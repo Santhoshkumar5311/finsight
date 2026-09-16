@@ -5,6 +5,7 @@ import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { io } from 'socket.io-client';
+import { request as httpRequest } from 'node:http';
 const port = 14019,
   base = `http://127.0.0.1:${port}`;
 let child, socket;
@@ -128,4 +129,67 @@ test('demo transaction broadcasts an update and changes totals in under two seco
 test('demo mode cannot exchange real bank tokens or receive live webhooks', async () => {
   assert.equal((await request('/api/plaid/link-token', 'POST', {})).status, 503);
   assert.equal((await request('/webhooks/plaid', 'POST', {})).status, 404);
+});
+
+test('local API blocks cross-origin browser requests and DNS rebinding hosts', async () => {
+  for (const headers of [
+    { Origin: 'https://untrusted.example' },
+    { Host: `untrusted.example:${port}` },
+    { 'Sec-Fetch-Site': 'cross-site' },
+  ]) {
+    const status = await new Promise((resolve, reject) => {
+      const req = httpRequest(base + '/api/dashboard', { headers }, (res) => {
+        res.resume();
+        resolve(res.statusCode);
+      });
+      req.on('error', reject);
+      req.end();
+    });
+    assert.equal(status, 403, JSON.stringify(headers));
+  }
+  const r = await fetch(base + '/api/dashboard', { headers: { Origin: 'http://localhost:3000' } });
+  assert.equal(r.status, 200);
+  assert.equal(r.headers.get('cache-control'), 'no-store');
+});
+test('websocket handshake rejects untrusted browser origins', async () => {
+  const client = io(base, {
+    transports: ['websocket'],
+    forceNew: true,
+    reconnection: false,
+    extraHeaders: { Origin: 'https://untrusted.example' },
+  });
+  try {
+    await new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error('Handshake did not finish')), 3000);
+      client.once('connect', () => {
+        clearTimeout(timeout);
+        reject(new Error('Untrusted connection accepted'));
+      });
+      client.once('connect_error', () => {
+        clearTimeout(timeout);
+        resolve();
+      });
+    });
+  } finally {
+    client.disconnect();
+  }
+});
+
+test('local recording persists encrypted and plays back without exposing audio in JSON', async () => {
+  const bytes = Buffer.from('local-test-audio-bytes');
+  const body = new FormData();
+  body.append('audio', new Blob([bytes], { type: 'audio/webm' }), 'reflection.webm');
+  body.append('text', 'Audio savings reflection');
+  const response = await fetch(base + '/api/diary', { method: 'POST', body });
+  assert.equal(response.status, 201);
+  const entry = await response.json();
+  assert.equal(entry.hasAudio, true);
+  assert.equal(entry.localAudio, undefined);
+  const dashboard = await request('/api/dashboard');
+  assert.equal(dashboard.body.diaries.find((d) => d.id === entry.id).localAudio, undefined);
+  const search = await request('/api/diary/search?q=Audio%20savings');
+  assert.equal(search.body.entries[0].localAudio, undefined);
+  const audio = await fetch(base + `/api/diary/${entry.id}/audio`);
+  assert.equal(audio.headers.get('content-type'), 'audio/webm');
+  assert.deepEqual(Buffer.from(await audio.arrayBuffer()), bytes);
 });

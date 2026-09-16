@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { Readable } from 'node:stream';
 import {
   S3Client,
   PutObjectCommand,
@@ -7,7 +8,7 @@ import {
 } from '@aws-sdk/client-s3';
 import { toFile } from 'openai';
 import { ai } from './agent.js';
-import { state, saveDiary, audit } from './repository.js';
+import { state, saveDiary, audit, localDiaryAudio } from './repository.js';
 import { redact } from './security.js';
 import { diaryTags, day } from '@finsight/core';
 import { live } from './config.js';
@@ -16,16 +17,11 @@ const s3 = new S3Client({ region: process.env.AWS_REGION || 'us-east-1' });
 export async function diaryEntry(user, { text, file }) {
   let transcript = text || '',
     audioKey;
-  if (file) {
-    if (!ai || !live)
-      throw Object.assign(
-        new Error(
-          'Audio transcription requires live mode with OpenAI and encrypted S3 configured. You can save a written reflection in demo mode.',
-        ),
-        { status: 503 },
-      );
+  if (file && live) {
     const audio = await toFile(file.buffer, file.originalname, { type: file.mimetype });
     transcript = (await ai.audio.transcriptions.create({ model: 'whisper-1', file: audio })).text;
+  } else if (file && !transcript.trim()) {
+    transcript = 'Audio reflection (not transcribed in local mode).';
   }
   // Persist redacted text; original audio remains private in KMS-encrypted storage.
   transcript = await privateText(transcript.slice(0, 12000));
@@ -58,7 +54,7 @@ export async function diaryEntry(user, { text, file }) {
       tags = parsed.tags.filter((t) => typeof t === 'string' && t.length <= 40).slice(0, 3);
     embedding = vector.data[0].embedding;
   }
-  if (file) {
+  if (file && live) {
     audioKey = `${user}/${id}`;
     await s3.send(
       new PutObjectCommand({
@@ -77,7 +73,10 @@ export async function diaryEntry(user, { text, file }) {
     transcript,
     tags,
     audioKey,
-    hasAudio: !!audioKey,
+    hasAudio: !!file,
+    ...(!live && file
+      ? { localAudio: { type: file.mimetype, body: file.buffer.toString('base64') } }
+      : {}),
     createdAt: new Date().toISOString(),
     transactionIds: s.transactions.filter((t) => t.date === day()).map((t) => t.id),
   };
@@ -91,7 +90,7 @@ export async function diaryEntry(user, { text, file }) {
     throw e;
   }
   await audit(user, 'diary.created', id);
-  const { audioKey: _, ...publicEntry } = entry;
+  const { audioKey: _, localAudio: __, ...publicEntry } = entry;
   return publicEntry;
 }
 export async function audioStream(user, id) {
@@ -99,5 +98,10 @@ export async function audioStream(user, id) {
   if (!entries.some((e) => e.id === id && e.hasAudio))
     throw Object.assign(new Error('Audio not found'), { status: 404 });
   await audit(user, 'diary.audio.read', id);
+  if (!live) {
+    const audio = localDiaryAudio(id);
+    if (!audio) throw Object.assign(new Error('Audio not found'), { status: 404 });
+    return { ContentType: audio.type, Body: Readable.from([Buffer.from(audio.body, 'base64')]) };
+  }
   return s3.send(new GetObjectCommand({ Bucket: process.env.AUDIO_BUCKET, Key: `${user}/${id}` }));
 }

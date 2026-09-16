@@ -13,7 +13,10 @@
     "test": "node --test services/api/test/*.test.js",
     "check": "npm run typecheck -w @finsight/web && npm test",
     "db:migrate": "npm run migrate -w @finsight/api",
-    "test:integration": "node --test services/api/integration/*.test.js"
+    "test:integration": "node --test services/api/integration/*.test.js",
+    "local": "node scripts/local.mjs",
+    "backup": "node scripts/backup.mjs create",
+    "restore": "node scripts/backup.mjs restore"
   },
   "devDependencies": {
     "@electric-sql/pglite": "^0.5.8",

@@ -1,5 +1,7 @@
 # Security implementation and deployment requirements
 
+The single-user local deployment is described in [LOCAL.md](LOCAL.md). It includes encrypted local diary/audio storage, passphrase-protected backups, origin/Host checks on HTTP and WebSocket handshakes, no-store responses and nonce-based script CSP. Local mode trusts the OS user and does not claim cloud or multi-user isolation.
+
 This is a runnable development implementation. It is not a security certification or a claim that an unconfigured environment satisfies all five layers.
 
 | Layer       | Implemented in code                                                                                                                                                                                   | Required to operate securely                                                                                                                                                                                                                                                                                                                                                                    |
@@ -26,5 +28,5 @@ This is a runnable development implementation. It is not a security certificatio
 2. Run Plaid Sandbox Link, initial/historical webhooks, mutation pagination, reconnect, revocation, replay and item-error scenarios. Verify USD exclusions are suitable for intended banks.
 3. Run on physical iOS and Android devices: OAuth deep links, TOTP, biometrics, keychain persistence, pin mismatch/rotation, foreground/background lock, audio permission/re-recording and notification scheduling.
 4. Deploy TLS/WAF/private storage, apply IAM and service DB grants, configure encrypted queue/cache storage, rotate keys, and test backup restoration. Terraform is a security foundation for an existing VPC/application load balancer; it does not deploy application compute or all Supabase services.
-5. Validate PII detection and remote mobile push; add immutable audit export, role-isolated worker deployment, and deployment-specific CSP nonces before accepting real customer data.
+5. Validate PII detection and remote mobile push; add immutable audit export, role-isolated worker deployment, and validation of CSP with live provider flows before accepting real customer data.
 6. Run external-service integration, concurrency, outage/recovery and load tests. Confirm the requested two-second webhook-to-dashboard and one-second LLM SLOs under representative load; do not infer them from local demo timings.

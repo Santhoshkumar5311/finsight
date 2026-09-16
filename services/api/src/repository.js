@@ -1,22 +1,21 @@
 import pg from 'pg';
-import { mkdir, readFile, writeFile, rename } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
+import { localStore } from './local-store.js';
 import { live } from './config.js';
 import { seed } from './seed.js';
 import { verifyChecksum } from './security.js';
 export const pool = live
   ? new pg.Pool({ connectionString: process.env.DATABASE_URL, max: 15 })
   : null;
-const path = process.env.DEMO_DATA_FILE
-  ? pathToFileURL(process.env.DEMO_DATA_FILE)
-  : new URL('../../../.data/demo.json', import.meta.url);
-let demo,
-  writeChain = Promise.resolve();
+const path =
+  process.env.DEMO_DATA_FILE || fileURLToPath(new URL('../../../.data/demo.json', import.meta.url));
+let demo, store;
 export async function initStore() {
   if (!live) {
+    store = await localStore(path);
     try {
-      demo = JSON.parse(await readFile(path, 'utf8'));
+      demo = await store.read();
     } catch (e) {
       if (e.code !== 'ENOENT') throw e;
       demo = seed();
@@ -25,13 +24,7 @@ export async function initStore() {
   }
 }
 async function persist() {
-  const snapshot = JSON.stringify(demo, null, 2);
-  writeChain = writeChain.then(async () => {
-    await mkdir(new URL('.', path), { recursive: true });
-    await writeFile(new URL('./demo.tmp', path), snapshot, { mode: 0o600 });
-    await rename(new URL('./demo.tmp', path), path);
-  });
-  await writeChain;
+  await store.write(demo);
 }
 export async function scoped(user, fn) {
   const c = await pool.connect();
@@ -49,7 +42,11 @@ export async function scoped(user, fn) {
   }
 }
 export async function state(user) {
-  if (!live) return structuredClone(demo);
+  if (!live)
+    return structuredClone({
+      ...demo,
+      diaries: demo.diaries.map(({ localAudio, ...entry }) => entry),
+    });
   return scoped(user, async (c) => {
     await c.query('INSERT INTO profiles(user_id) VALUES($1) ON CONFLICT DO NOTHING', [user]);
     const result = {};
@@ -139,7 +136,8 @@ export async function searchDiary(user, query, embedding) {
           e.transcript.toLowerCase().includes(query.toLowerCase()) ||
           e.tags.some((t) => t.includes(query.toLowerCase())),
       )
-      .slice(0, 5);
+      .slice(0, 5)
+      .map(({ localAudio, ...entry }) => entry);
   return scoped(
     user,
     async (c) =>
@@ -237,4 +235,9 @@ export async function deleteSubscription(user, id) {
   return scoped(user, (c) =>
     c.query('DELETE FROM push_subscriptions WHERE id=$1 AND user_id=$2', [id, user]),
   );
+}
+
+export function localDiaryAudio(id) {
+  if (live) return null;
+  return demo.diaries.find((entry) => entry.id === id)?.localAudio;
 }

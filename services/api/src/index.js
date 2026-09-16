@@ -18,13 +18,14 @@ import { chat, queryIndex } from './agent.js';
 import { diaryEntry, audioStream } from './audio.js';
 import { startReminders, pushReady } from './notifications.js';
 import { privateText } from './privacy.js';
+import { origins, allowedRequest, requestSecurity } from './request-security.js';
 await repo.initStore();
 const app = express(),
   http = createServer(app);
 app.disable('x-powered-by');
 app.set('trust proxy', live ? 1 : false);
-app.use(helmet());
-const origins = [config.origin, ...(!live ? ['http://127.0.0.1:3000'] : [])];
+app.use(helmet({ strictTransportSecurity: live ? undefined : false }));
+app.use(requestSecurity);
 app.use(cors({ origin: origins, credentials: true }));
 app.use(
   rateLimit({ windowMs: 60000, limit: 180, standardHeaders: 'draft-8', legacyHeaders: false }),
@@ -61,6 +62,7 @@ app.use('/api', async (req, res, next) => {
 const io = new Server(http, {
   cors: { origin: origins, credentials: true },
   maxHttpBufferSize: 16384,
+  allowRequest: (req, callback) => callback(null, allowedRequest(req)),
 });
 io.use(async (socket, next) => {
   try {

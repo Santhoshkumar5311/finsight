@@ -11,10 +11,10 @@ Requires Node.js 22 or later and npm.
 ```sh
 cd finsight
 npm ci
-npm run dev
+npm run local
 ```
 
-Open **http://localhost:3000**. The API listens on **http://localhost:4000**. Demo data persists in `.data/demo.json`; it contains synthetic accounts and transactions. No external API is called in demo mode. Written diary entries, budgets, bills and preferences persist. Web recording and local playback work; real transcription explicitly requires live services.
+Open **http://localhost:3000**. The API listens on **http://localhost:4000**. Local data persists encrypted in `.data/demo.json`, with an owner-only key in `.data/demo.json.key`; bank accounts and transactions are synthetic. No external API is called in demo mode. Written diary entries, budgets, bills and preferences persist. Written reflections and audio recordings save locally with encrypted storage and playback; real transcription explicitly requires live services. See [local setup and backup/restore](docs/LOCAL.md). Use `npm run dev` for hot-reloading development.
 
 Try these flows:
 

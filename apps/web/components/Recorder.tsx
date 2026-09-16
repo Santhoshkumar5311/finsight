@@ -121,13 +121,13 @@ export default function Recorder({
     setError('');
     try {
       const body = new FormData();
-      if (blob && mode === 'live')
+      if (blob)
         body.append(
           'audio',
           blob,
           blob.type.includes('mp4') ? 'reflection.m4a' : 'reflection.webm',
         );
-      else body.append('text', text);
+      if (text.trim()) body.append('text', text);
       await api('/api/diary', { method: 'POST', body });
       onSaved();
       onClose();
@@ -184,8 +184,8 @@ export default function Recorder({
         />
         {mode === 'demo' && (
           <p className="notice">
-            Demo saves written reflections. Recording and playback work locally; transcription and
-            encrypted storage need live services.
+            Reflections and recordings are encrypted on this computer. Add a written note for
+            search; automatic transcription requires live services.
           </p>
         )}
         {error && (
@@ -194,12 +194,16 @@ export default function Recorder({
           </p>
         )}
         <button
-          disabled={busy || recording || (!text.trim() && !(blob && mode === 'live'))}
+          disabled={busy || recording || (!text.trim() && !blob)}
           className="button primary full"
           onClick={save}
         >
           {busy ? <LoaderCircle className="spin" size={17} /> : <ArrowUp size={17} />}{' '}
-          {busy ? 'Transcribing & finding connections…' : 'Save reflection'}
+          {busy
+            ? mode === 'live'
+              ? 'Transcribing & finding connections…'
+              : 'Saving reflection…'
+            : 'Save reflection'}
         </button>
       </section>
     </div>
