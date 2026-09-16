@@ -1,0 +1,28 @@
+{
+  "name": "finsight",
+  "private": true,
+  "version": "1.0.0",
+  "workspaces": [
+    "apps/web",
+    "services/api",
+    "packages/core"
+  ],
+  "scripts": {
+    "dev": "concurrently -k -n api,web -c green,blue \"npm run dev -w @finsight/api\" \"npm run dev -w @finsight/web\"",
+    "build": "npm run build -w @finsight/web",
+    "test": "node --test services/api/test/*.test.js",
+    "check": "npm run typecheck -w @finsight/web && npm test",
+    "db:migrate": "npm run migrate -w @finsight/api",
+    "test:integration": "node --test services/api/integration/*.test.js"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "^0.5.8",
+    "@electric-sql/pglite-pgvector": "^0.0.9",
+    "@playwright/test": "^1.56.0",
+    "concurrently": "^9.2.1",
+    "prettier": "^3.9.7"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

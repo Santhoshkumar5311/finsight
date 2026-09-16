@@ -1,0 +1,28 @@
+{
+  "expo": {
+    "name": "FinSight",
+    "slug": "finsight",
+    "scheme": "finsight",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "automatic",
+    "ios": {
+      "bundleIdentifier": "com.finsight.diary",
+      "supportsTablet": true,
+      "infoPlist": {
+        "NSFaceIDUsageDescription": "Unlock your private FinSight diary.",
+        "NSMicrophoneUsageDescription": "Record your financial reflections."
+      }
+    },
+    "android": {
+      "package": "com.finsight.diary",
+      "permissions": ["RECORD_AUDIO", "USE_BIOMETRIC"]
+    },
+    "plugins": [
+      "expo-secure-store",
+      ["expo-local-authentication", { "faceIDPermission": "Unlock your private FinSight diary." }],
+      ["expo-audio", { "microphonePermission": "Record your financial reflections." }],
+      "expo-notifications"
+    ]
+  }
+}
