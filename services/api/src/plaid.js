@@ -1,3 +1,4 @@
+import { plaidRegionalOptions } from '@finsight/core';
 import { PlaidApi, Configuration, PlaidEnvironments } from 'plaid';
 import { decodeProtectedHeader, importJWK, jwtVerify } from 'jose';
 import { createHash, timingSafeEqual } from 'node:crypto';
@@ -16,13 +17,12 @@ export const plaid = new PlaidApi(
     },
   }),
 );
-export async function linkToken(user) {
+export async function linkToken(user, preferences = { region: 'US' }) {
   const { data } = await plaid.linkTokenCreate({
     user: { client_user_id: user },
     client_name: 'FinSight',
     products: ['transactions'],
-    country_codes: ['US'],
-    language: 'en',
+    ...plaidRegionalOptions(preferences),
     webhook: process.env.PLAID_WEBHOOK_URL,
     transactions: { days_requested: 90 },
   });

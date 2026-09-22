@@ -86,7 +86,7 @@ export type Data = {
   bills: Bill[];
   diaries: Diary[];
   budgets: { category: string; limit: number }[];
-  preferences: { leadHours: number[]; notifications: boolean };
+  preferences: { leadHours: number[]; notifications: boolean; region: string };
   summary: {
     currency: string;
     income: number;

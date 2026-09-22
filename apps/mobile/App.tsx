@@ -52,7 +52,7 @@ type Finance = {
   }[];
   diaries: { id: string; transcript: string; tags: string[]; createdAt: string }[];
   budgets: { category: string; limit: number }[];
-  preferences: { leadHours: number[]; notifications: boolean };
+  preferences: { leadHours: number[]; notifications: boolean; region: string };
 };
 export default function App() {
   const dark = useColorScheme() === 'dark';
@@ -82,6 +82,9 @@ export default function App() {
     [code, setCode] = useState(''),
     [leads, setLeads] = useState([72, 24, 1]),
     [wave, setWave] = useState<number[]>(Array(22).fill(4));
+  const [bankRegions, setBankRegions] = useState<
+    { code: string; name: string; providerName: string | null }[]
+  >([]);
   const recorder = useAudioRecorder({
     ...RecordingPresets.HIGH_QUALITY,
     isMeteringEnabled: true,
@@ -91,7 +94,10 @@ export default function App() {
   const socket = useRef<ReturnType<typeof io> | null>(null);
   const load = useCallback(async () => {
     try {
-      setData(await api('/api/dashboard'));
+      const dashboard = await api('/api/dashboard');
+      setData(dashboard);
+      const catalog = await api('/api/regions');
+      setBankRegions(catalog.regions);
       setError('');
     } catch (e) {
       setError((e as Error).message);
@@ -192,6 +198,20 @@ export default function App() {
     setSecret(r.data.totp.secret);
   }
   async function connectBank() {
+    const catalog = await api('/api/regions');
+    const route = catalog.regions.find(
+      (r: { code: string }) => r.code === catalog.preferences.region,
+    );
+    if (route?.provider === 'icici-statement') {
+      Alert.alert(
+        'ICICI statement import',
+        'Open FinSight on the web and choose Connect account to upload your ICICI PDF, XLS or CSV. Live Account Aggregator connectivity is not configured.',
+      );
+      return;
+    }
+    if (!route?.provider) throw new Error('No bank provider is available for this country yet.');
+    if (!route.available)
+      throw new Error('Plaid bank connections are not configured in local mode.');
     const t = await api('/api/plaid/link-token', { method: 'POST' });
     const session = await createPlaidLinkSession({
       token: t.link_token,
@@ -607,6 +627,41 @@ export default function App() {
         )}
         {tab === 'Settings' && (
           <View style={[styles.card, { backgroundColor: colors.panel }]}>
+            <Text style={[styles.section, { color: colors.text }]}>Bank region</Text>
+            <Text style={styles.subtitle}>
+              Choose the country where your bank is located. Existing accounts and currencies stay
+              unchanged.
+            </Text>
+            {bankRegions.map((region) => (
+              <Pressable
+                key={region.code}
+                style={styles.row}
+                disabled={busy}
+                accessibilityRole="radio"
+                accessibilityState={{
+                  checked: data?.preferences.region === region.code,
+                  disabled: busy,
+                }}
+                onPress={() =>
+                  void run(async () => {
+                    await api('/api/preferences', {
+                      method: 'PUT',
+                      body: JSON.stringify({ region: region.code }),
+                    });
+                    await load();
+                  })
+                }
+              >
+                <View>
+                  <Text style={{ color: colors.text }}>
+                    {data?.preferences.region === region.code ? '●' : '○'} {region.name}
+                  </Text>
+                  <Text style={styles.subtitle}>
+                    {region.providerName || 'No provider available yet'}
+                  </Text>
+                </View>
+              </Pressable>
+            ))}
             <Text style={[styles.section, { color: colors.text }]}>Bill reminders</Text>
             <Text style={styles.subtitle}>
               Choose when you’d like a gentle nudge before bills are due.

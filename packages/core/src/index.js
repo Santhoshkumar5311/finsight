@@ -313,3 +313,5 @@ export function forecastNextMonth(state, now = new Date(), currency = primaryCur
     fixedExpenses: Math.max(fixed, knownBills),
   };
 }
+
+export { regions, regionalPreferences, bankingRoute, plaidRegionalOptions } from './regions.js';

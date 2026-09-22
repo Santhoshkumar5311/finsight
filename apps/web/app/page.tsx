@@ -62,6 +62,7 @@ import {
 import Recorder from '@/components/Recorder';
 import Assistant from '@/components/Assistant';
 import Onboarding from '@/components/Onboarding';
+import RegionalSettings from '@/components/RegionalSettings';
 import { useDialog } from '@/lib/useDialog';
 const nav = [
   { name: 'Overview', icon: LayoutDashboard },
@@ -1080,6 +1081,7 @@ export default function Page() {
               {tab === 'Settings' && (
                 <section className="card settings-card">
                   <h3>Your preferences</h3>
+                  <RegionalSettings preferences={data.preferences} onSaved={load} />
                   <div className="setting-row">
                     <div>
                       <strong>Dark appearance</strong>
@@ -1270,7 +1272,14 @@ export default function Page() {
           <Assistant onClose={() => setAssistant(false)} />
         </>
       )}
-      {connect && <Onboarding mode={mode} onClose={() => setConnect(false)} onComplete={load} />}
+      {connect && data && (
+        <Onboarding
+          preferences={data.preferences}
+          mode={mode}
+          onClose={() => setConnect(false)}
+          onComplete={load}
+        />
+      )}
       {billModal && (
         <BillModal
           currency={s?.currency || 'USD'}

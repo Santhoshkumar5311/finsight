@@ -151,3 +151,9 @@ Install Python 3.10+ and run `npm run setup:imports`. Accounts → Import accept
 For a separate personal workspace, set `DEMO_DATA_FILE=.data/personal.json` and independent random `PII_TOKEN_KEY`/`CHECKSUM_KEY` in your private `.env`. Stop the API and use `npm run import:statements -- /path/to/statement.pdf /path/to/history.xls`; this creates an empty encrypted workspace instead of mixing sample accounts. Preserve these keys and the store's adjacent encryption key.
 
 See [authentication and recovery](docs/AUTHENTICATION.md), [local models and Prime Agent](docs/LOCAL_AI.md), and [production deployment gates](docs/PRODUCTION.md). `npm run release:check` runs web types, unit/security/database tests, HTTP/socket tests and a production web build.
+
+## Bank region
+
+Choose **Settings → Bank region**, or select a country inside **Connect account**. The interface stays in English. United States uses Plaid when live services are configured; India offers ICICI PDF/XLS/CSV statement import. Other region shows an explicit unavailable state. India Account Aggregator connectivity remains unconfigured. On mobile, the same preference selects the connection route; ICICI uploads are available in the web dashboard.
+
+Region is persisted per user in profile preferences. It controls new bank connections, not existing records, currencies, or background syncing. Existing INR-only workspaces default to India; other legacy workspaces default to United States until a selection is saved. Partial reminder updates preserve the selection. Both the UI and API enforce provider compatibility. Add future providers through `packages/core/src/regions.js` plus their integration and UI; listing a region alone does not enable a bank connection.

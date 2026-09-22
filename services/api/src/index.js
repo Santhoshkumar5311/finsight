@@ -1,3 +1,4 @@
+import { regions, regionalPreferences, bankingRoute } from '@finsight/core';
 import './config.js';
 import express from 'express';
 import cors from 'cors';
@@ -217,17 +218,34 @@ app.get('/api/dashboard', async (req, res) => {
   const currencies = currenciesPresent(s);
   if (options.currency && !currencies.includes(options.currency))
     return res.status(400).json({ error: `No accounts or transactions use ${options.currency}` });
-  res.json({ ...s, summary: summarize(s, options), currencies, mode: config.mode });
+  res.json({
+    ...s,
+    preferences: { ...s.preferences, ...regionalPreferences(s) },
+    summary: summarize(s, options),
+    currencies,
+    mode: config.mode,
+  });
+});
+app.get('/api/regions', async (req, res) => {
+  const s = await repo.state(req.user.id);
+  res.json({
+    regions: regions.map((r) => ({
+      ...r,
+      available: r.provider === 'icici-statement' || (r.provider === 'plaid' && live),
+    })),
+    preferences: regionalPreferences(s),
+  });
 });
 app.post('/api/plaid/link-token', async (req, res) => {
+  const preferences = bankingRoute(await repo.state(req.user.id), 'plaid');
   if (!live)
     return res.status(503).json({
-      error:
-        'Live bank connections require Plaid credentials. Demo accounts are already connected.',
+      error: 'Plaid bank connections are not configured in local mode.',
     });
-  res.json(await linkToken(req.user.id));
+  res.json(await linkToken(req.user.id, preferences));
 });
 app.post('/api/plaid/exchange', async (req, res) => {
+  bankingRoute(await repo.state(req.user.id), 'plaid');
   if (!live) return res.sendStatus(404);
   const { publicToken } = z
     .object({ publicToken: z.string().min(10).max(500) })
@@ -254,8 +272,9 @@ app.get('/api/plaid/status', async (req, res) => {
 app.get('/api/india/status', (req, res) =>
   res.json({ sandboxEnabled: live && aaSandboxEnabled() }),
 );
-app.post('/api/india/consent', (req, res) => {
+app.post('/api/india/consent', async (req, res) => {
   if (!live) return res.status(404).json({ error: 'Not available in demo' });
+  bankingRoute(await repo.state(req.user.id), 'icici-statement');
   res.status(201).json(createConsent(req.user.id));
 });
 app.get('/api/india/consent/:id/status', (req, res) => {
@@ -264,6 +283,7 @@ app.get('/api/india/consent/:id/status', (req, res) => {
 });
 app.post('/api/india/import-sandbox', async (req, res) => {
   if (!live) return res.status(404).json({ error: 'Not available in demo' });
+  bankingRoute(await repo.state(req.user.id), 'icici-statement');
   const { consentId } = z.object({ consentId: z.uuid() }).strict().parse(req.body);
   const result = await importSandboxData(req.user.id, consentId);
   await updateDashboard(req.user.id);
@@ -286,74 +306,86 @@ const csvUpload = multer({
 });
 // Works in demo and live mode alike: no external credentials or approvals are needed to
 // import a statement you already downloaded yourself from ICICI's NetBanking portal.
-app.post('/api/accounts/import/icici', csvUpload.single('statement'), async (req, res) => {
-  if (!req.file)
-    return res
-      .status(400)
-      .json({ error: 'Attach an ICICI CSV, XLS transaction history, or credit-card PDF' });
-  const body = z
-    .object({
-      accountName: z.string().min(1).max(60).optional(),
-      last4: z
-        .string()
-        .regex(/^\d{4}$/)
-        .optional(),
-    })
-    .parse(req.body || {});
-  let accountId = tokenise('icici-statement:' + req.user.id);
-  let parsed;
-  try {
-    const binary =
-      req.file.buffer.subarray(0, 5).toString() === '%PDF-' ||
-      req.file.buffer.subarray(0, 8).toString('hex') === 'd0cf11e0a1b11ae1';
-    parsed = binary
-      ? await parseIciciDocument(req.file.buffer, req.user.id)
-      : parseIciciStatement(req.file.buffer.toString('utf8'), accountId);
-    accountId = parsed.accountId || accountId;
-  } catch (e) {
-    if (e instanceof StatementImportError) return res.status(400).json({ error: e.message });
-    throw e;
-  }
-  const existing = await repo.getAccount(req.user.id, accountId);
-  const accountMeta = {
-    provider: 'icici-statement',
-    accountId,
-    institution: 'ICICI Bank',
-    accountName:
-      body.accountName ||
-      existing?.name ||
-      (parsed.accountType === 'credit' ? 'ICICI credit card' : 'ICICI savings account'),
-    accountType: parsed.accountType || 'depository',
-    accountSubtype: parsed.accountType === 'credit' ? 'credit-card' : 'savings',
-    balanceDate:
-      parsed.balanceDate ||
-      parsed.transactions
-        .map((t) => t.date)
-        .sort()
-        .at(-1),
-    maskedNumber: parsed.last4
-      ? '••' + parsed.last4
-      : body.last4
-        ? '••' + body.last4
-        : existing?.mask || '••••',
-    currency: 'INR',
-    currentBalance:
-      parsed.closingBalance ?? (existing?.balance != null ? Number(existing.balance) : 0),
-  };
-  await repo.importTransactions(req.user.id, accountMeta, parsed.transactions, {
-    sourceHash: createHash('sha256').update(req.file.buffer).digest('hex'),
-    skipped: parsed.skipped,
-  });
-  await updateDashboard(req.user.id);
-  res.status(202).json({
-    imported: parsed.rowCount,
-    reconciled: !!parsed.reconciled,
-    balanceAsOf: parsed.balanceDate,
-    skipped: parsed.skipped,
-    warnings: parsed.warnings.slice(0, 20),
-    accountId,
-  });
-});
+app.post(
+  '/api/accounts/import/icici',
+  async (req, res, next) => {
+    try {
+      bankingRoute(await repo.state(req.user.id), 'icici-statement');
+      next();
+    } catch (error) {
+      next(error);
+    }
+  },
+  csvUpload.single('statement'),
+  async (req, res) => {
+    if (!req.file)
+      return res
+        .status(400)
+        .json({ error: 'Attach an ICICI CSV, XLS transaction history, or credit-card PDF' });
+    const body = z
+      .object({
+        accountName: z.string().min(1).max(60).optional(),
+        last4: z
+          .string()
+          .regex(/^\d{4}$/)
+          .optional(),
+      })
+      .parse(req.body || {});
+    let accountId = tokenise('icici-statement:' + req.user.id);
+    let parsed;
+    try {
+      const binary =
+        req.file.buffer.subarray(0, 5).toString() === '%PDF-' ||
+        req.file.buffer.subarray(0, 8).toString('hex') === 'd0cf11e0a1b11ae1';
+      parsed = binary
+        ? await parseIciciDocument(req.file.buffer, req.user.id)
+        : parseIciciStatement(req.file.buffer.toString('utf8'), accountId);
+      accountId = parsed.accountId || accountId;
+    } catch (e) {
+      if (e instanceof StatementImportError) return res.status(400).json({ error: e.message });
+      throw e;
+    }
+    const existing = await repo.getAccount(req.user.id, accountId);
+    const accountMeta = {
+      provider: 'icici-statement',
+      accountId,
+      institution: 'ICICI Bank',
+      accountName:
+        body.accountName ||
+        existing?.name ||
+        (parsed.accountType === 'credit' ? 'ICICI credit card' : 'ICICI savings account'),
+      accountType: parsed.accountType || 'depository',
+      accountSubtype: parsed.accountType === 'credit' ? 'credit-card' : 'savings',
+      balanceDate:
+        parsed.balanceDate ||
+        parsed.transactions
+          .map((t) => t.date)
+          .sort()
+          .at(-1),
+      maskedNumber: parsed.last4
+        ? '••' + parsed.last4
+        : body.last4
+          ? '••' + body.last4
+          : existing?.mask || '••••',
+      currency: 'INR',
+      currentBalance:
+        parsed.closingBalance ?? (existing?.balance != null ? Number(existing.balance) : 0),
+    };
+    await repo.importTransactions(req.user.id, accountMeta, parsed.transactions, {
+      sourceHash: createHash('sha256').update(req.file.buffer).digest('hex'),
+      skipped: parsed.skipped,
+    });
+    await updateDashboard(req.user.id);
+    res.status(202).json({
+      imported: parsed.rowCount,
+      reconciled: !!parsed.reconciled,
+      balanceAsOf: parsed.balanceDate,
+      skipped: parsed.skipped,
+      warnings: parsed.warnings.slice(0, 20),
+      accountId,
+    });
+  },
+);
 app.post('/api/chat', rateLimit({ windowMs: 60000, limit: 20 }), async (req, res) => {
   const body = z
     .object({ message: z.string().min(1).max(2000), allowReminder: z.boolean().default(false) })
@@ -410,13 +442,21 @@ app.post('/api/bills', async (req, res) => {
 app.put('/api/preferences', async (req, res) => {
   const body = z
     .object({
-      leadHours: z.array(z.union([z.literal(72), z.literal(24), z.literal(1)])).max(3),
-      notifications: z.boolean(),
+      leadHours: z
+        .array(z.union([z.literal(72), z.literal(24), z.literal(1)]))
+        .max(3)
+        .optional(),
+      notifications: z.boolean().optional(),
+      region: z.enum(['US', 'IN', 'OTHER']).optional(),
     })
     .strict()
     .parse(req.body);
-  await repo.savePreferences(req.user.id, body);
-  res.json(body);
+  const existing = await repo.state(req.user.id);
+  const changes = body;
+  const preferences = { ...existing.preferences, ...regionalPreferences(existing), ...changes };
+  await repo.savePreferences(req.user.id, preferences);
+  await updateDashboard(req.user.id);
+  res.json(preferences);
 });
 const upload = multer({
   storage: multer.memoryStorage(),

@@ -155,6 +155,7 @@ test('the India Account Aggregator sandbox is off by default and unreachable in 
   assert.equal((await request('/api/india/import-sandbox', 'POST', {})).status, 404);
 });
 test('importing an ICICI statement adds real INR transactions that feed the existing dashboard', async () => {
+  assert.equal((await request('/api/preferences', 'PUT', { region: 'IN' })).status, 200);
   // Dated within the current month, like the seed data, so the default dashboard window includes them.
   const now = new Date(),
     pad = (n) => String(n).padStart(2, '0'),
@@ -283,6 +284,32 @@ test('local account cannot be claimed twice and bad credentials are rejected', a
       .status,
     401,
   );
+});
+test('bank region persists, preserves existing records, and gates provider endpoints', async () => {
+  const before = (await request('/api/dashboard')).body;
+  let response = await request('/api/preferences', 'PUT', { region: 'US' });
+  assert.equal(response.status, 200);
+  assert.deepEqual(response.body.leadHours, before.preferences.leadHours);
+  const us = (await request('/api/regions')).body;
+  assert.equal(us.preferences.region, 'US');
+  assert.equal(us.regions.find((r) => r.code === 'US').provider, 'plaid');
+  assert.equal(us.regions.find((r) => r.code === 'US').available, false);
+  assert.equal((await request('/api/accounts/import/icici', 'POST', {})).status, 409);
+  assert.equal((await request('/api/plaid/link-token', 'POST', {})).status, 503);
+  await request('/api/preferences', 'PUT', { region: 'IN' });
+  assert.equal((await request('/api/plaid/link-token', 'POST', {})).status, 409);
+  // Older mobile clients update reminders without erasing the region.
+  await request('/api/preferences', 'PUT', { leadHours: [72], notifications: false });
+  assert.equal((await request('/api/dashboard')).body.preferences.region, 'IN');
+  await request('/api/preferences', 'PUT', { region: 'OTHER' });
+  assert.equal((await request('/api/plaid/link-token', 'POST', {})).status, 409);
+  assert.equal((await request('/api/accounts/import/icici', 'POST', {})).status, 409);
+  assert.equal((await request('/api/preferences', 'PUT', { region: 'ZZ' })).status, 400);
+  const after = (await request('/api/dashboard')).body;
+  assert.deepEqual(after.accounts, before.accounts);
+  assert.deepEqual(after.transactions, before.transactions);
+  assert.equal(after.summary.currency, before.summary.currency);
+  await request('/api/preferences', 'PUT', { region: 'IN' });
 });
 test('password change invalidates older sessions and logout invalidates the new cookie', async () => {
   const oldCookie = cookie;
