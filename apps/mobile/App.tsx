@@ -29,10 +29,12 @@ import { io } from 'socket.io-client';
 import Svg, { Circle } from 'react-native-svg';
 import { API, api, initializeSecurity, live, sessionToken, supabase, unlock } from './security';
 WebBrowser.maybeCompleteAuthSession();
-const money = (n: number) =>
-  new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(n / 100);
+const currencyLocales: Record<string, string> = { USD: 'en-US', INR: 'en-IN' };
+const money = (n: number, currency = 'USD') =>
+  new Intl.NumberFormat(currencyLocales[currency], { style: 'currency', currency }).format(n / 100);
 type Finance = {
   summary: {
+    currency: string;
     profit: number;
     income: number;
     expenses: number;
@@ -40,7 +42,14 @@ type Finance = {
     spending: { name: string; amount: number; color: string }[];
     bills: { id: string; name: string; amount: number; due: string; status: string }[];
   };
-  transactions: { id: string; name: string; amount: number; date: string; category: string }[];
+  transactions: {
+    id: string;
+    name: string;
+    amount: number;
+    date: string;
+    category: string;
+    currency: string;
+  }[];
   diaries: { id: string; transcript: string; tags: string[]; createdAt: string }[];
   budgets: { category: string; limit: number }[];
   preferences: { leadHours: number[]; notifications: boolean };
@@ -54,6 +63,10 @@ export default function App() {
     muted: dark ? '#a1b293' : '#8b9880',
   };
   const [ready, setReady] = useState(false),
+    [localEmail, setLocalEmail] = useState(''),
+    [localPassword, setLocalPassword] = useState(''),
+    [localSetup, setLocalSetup] = useState(false),
+    [authEpoch, setAuthEpoch] = useState(0),
     [locked, setLocked] = useState(live),
     [data, setData] = useState<Finance | null>(null),
     [tab, setTab] = useState('Home'),
@@ -102,17 +115,21 @@ export default function App() {
   useEffect(() => {
     if (!ready || locked) return;
     void load();
+    if (!live)
+      void api('/config')
+        .then((c) => setLocalSetup(c.setupRequired))
+        .catch(() => {});
     let cancelled = false;
     void sessionToken().then((token) => {
       if (cancelled) return;
-      socket.current = io(API, { auth: { token } });
+      socket.current = io(API, { auth: { token }, withCredentials: true });
       socket.current.on('dashboard:update', () => void load());
     });
     return () => {
       cancelled = true;
       socket.current?.disconnect();
     };
-  }, [ready, locked, load]);
+  }, [ready, locked, load, authEpoch]);
   useEffect(() => {
     if (!ready || locked) return;
     const subscription = supabase?.auth.onAuthStateChange((event, session) => {
@@ -291,6 +308,53 @@ export default function App() {
         </View>
       </SafeAreaView>
     );
+  if (!live && !data)
+    return (
+      <SafeAreaView style={[styles.screen, { backgroundColor: colors.bg }]}>
+        <View style={styles.content}>
+          <Text style={[styles.brand, { color: colors.text }]}>finsight.</Text>
+          <Text style={[styles.title, { color: colors.text }]}>
+            {localSetup ? 'Create your local account' : 'Welcome back'}
+          </Text>
+          <Text style={styles.subtitle}>
+            Use the same account as the local web dashboard. Simulator testing only; the API stays
+            on loopback.
+          </Text>
+          <TextInput
+            accessibilityLabel="Email"
+            style={styles.input}
+            autoCapitalize="none"
+            keyboardType="email-address"
+            value={localEmail}
+            onChangeText={setLocalEmail}
+            placeholder="Email address"
+          />
+          <TextInput
+            accessibilityLabel="Password"
+            style={styles.input}
+            secureTextEntry
+            value={localPassword}
+            onChangeText={setLocalPassword}
+            placeholder="Password (at least 12 characters)"
+          />
+          {error && <Text style={styles.error}>{error}</Text>}
+          <Button
+            title={localSetup ? 'Create local account' : 'Sign in'}
+            onPress={() =>
+              void run(async () => {
+                await api(localSetup ? '/auth/register' : '/auth/login', {
+                  method: 'POST',
+                  body: JSON.stringify({ email: localEmail, password: localPassword }),
+                });
+                setLocalPassword('');
+                setAuthEpoch((n) => n + 1);
+                await load();
+              })
+            }
+          />
+        </View>
+      </SafeAreaView>
+    );
   return (
     <SafeAreaView style={[styles.screen, { backgroundColor: colors.bg }]}>
       <View style={styles.header}>
@@ -353,7 +417,9 @@ export default function App() {
           <>
             <View style={styles.profit}>
               <Text style={styles.eyebrow}>AVAILABLE BALANCE</Text>
-              <Text style={styles.balance}>{money(data.summary.profit)}</Text>
+              <Text style={styles.balance}>
+                {money(data.summary.profit, data.summary.currency)}
+              </Text>
               <Text style={styles.subtitle}>Income − expenses − outstanding debt</Text>
               <View style={styles.metricRow}>
                 {[
@@ -363,7 +429,7 @@ export default function App() {
                 ].map(([label, value]) => (
                   <View key={label}>
                     <Text style={styles.muted}>{label}</Text>
-                    <Text style={styles.metric}>{money(Number(value))}</Text>
+                    <Text style={styles.metric}>{money(Number(value), data.summary.currency)}</Text>
                   </View>
                 ))}
               </View>
@@ -404,7 +470,9 @@ export default function App() {
                         style={{ width: 7, height: 7, borderRadius: 3, backgroundColor: c.color }}
                       />
                       <Text style={[styles.muted, { flex: 1 }]}>{c.name}</Text>
-                      <Text style={{ color: colors.text, fontSize: 11 }}>{money(c.amount)}</Text>
+                      <Text style={{ color: colors.text, fontSize: 11 }}>
+                        {money(c.amount, data.summary.currency)}
+                      </Text>
                     </View>
                   ))}
                 </View>
@@ -428,7 +496,7 @@ export default function App() {
                     </View>
                     <Text style={{ color: t.amount < 0 ? '#8fa86b' : colors.text, fontSize: 12 }}>
                       {t.amount < 0 ? '+' : '−'}
-                      {money(Math.abs(t.amount))}
+                      {money(Math.abs(t.amount), t.currency)}
                     </Text>
                   </View>
                 ))}
@@ -446,7 +514,9 @@ export default function App() {
               <View key={b.id} style={[styles.card, { backgroundColor: colors.panel }]}>
                 <View style={styles.legend}>
                   <Text style={[styles.section, { flex: 1, color: colors.text }]}>{b.name}</Text>
-                  <Text style={{ color: colors.text }}>{money(b.amount)}</Text>
+                  <Text style={{ color: colors.text }}>
+                    {money(b.amount, data.summary.currency)}
+                  </Text>
                 </View>
                 <Text style={styles.muted}>
                   {b.due} · {b.status}
@@ -464,7 +534,7 @@ export default function App() {
               <View key={b.category} style={[styles.card, { backgroundColor: colors.panel }]}>
                 <Text style={[styles.section, { color: colors.text }]}>{b.category}</Text>
                 <Text style={styles.subtitle}>
-                  {money(spent)} of {money(b.limit)}
+                  {money(spent, data.summary.currency)} of {money(b.limit, data.summary.currency)}
                 </Text>
                 <View style={styles.track}>
                   <View
@@ -556,6 +626,20 @@ export default function App() {
             ))}
             <Button title="Save device reminders" onPress={() => void run(reminders)} />
             <Button title="Connect account" secondary onPress={() => void run(connectBank)} />
+            <Button
+              title="Sign out"
+              secondary
+              onPress={() =>
+                void run(async () => {
+                  await api('/api/session/logout', { method: 'POST' });
+                  await supabase?.auth.signOut({ scope: 'local' });
+                  socket.current?.disconnect();
+                  setData(null);
+                  setReply('');
+                  setTab('Home');
+                })
+              }
+            />
             {live && (
               <Button
                 title="Lock diary"

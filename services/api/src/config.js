@@ -10,6 +10,10 @@ export const live = config.mode === 'live';
 if (!['demo', 'live'].includes(config.mode)) throw new Error('APP_MODE must be demo or live');
 if (process.env.NODE_ENV === 'production' && !live)
   throw new Error('Demo mode cannot run in production');
+// The India Account Aggregator adapter is a local sandbox mock (see providers/india-aa.js);
+// no real TSP/FIU integration exists, so it must never be reachable in a real deployment.
+if (process.env.NODE_ENV === 'production' && process.env.AA_SANDBOX_ENABLED === 'true')
+  throw new Error('AA_SANDBOX_ENABLED must not be true in production');
 if (live)
   for (const key of [
     'DATABASE_URL',
@@ -41,4 +45,15 @@ if (live && process.env.NODE_ENV === 'production') {
     !process.env.RABBITMQ_URL.startsWith('amqps://')
   )
     throw new Error('Production cache and queue connections must use TLS');
+}
+
+if (!['api', 'worker'].includes(process.env.SERVICE_ROLE || 'api'))
+  throw new Error('SERVICE_ROLE must be api or worker');
+if (live && process.env.NODE_ENV === 'production') {
+  for (const key of ['DATABASE_SSL_CA', 'AUDIT_BUCKET'])
+    if (!process.env[key]) throw new Error(`Missing ${key}`);
+  if (new URL(process.env.DATABASE_URL).searchParams.get('sslmode') === 'disable')
+    throw new Error('Database TLS cannot be disabled');
+  if (process.env.PII_TOKEN_KEY === process.env.CHECKSUM_KEY)
+    throw new Error('PII and checksum keys must be independent');
 }

@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:net';
 import { fileURLToPath } from 'node:url';
-import { readFile } from 'node:fs/promises';
+import { readFile, cp, mkdir } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import dotenv from 'dotenv';
 const root = fileURLToPath(new URL('../', import.meta.url));
@@ -65,16 +65,21 @@ await new Promise((ok, fail) => {
   build.once('error', fail);
   build.once('exit', (code) => (code === 0 ? ok() : fail(new Error('Dashboard build failed'))));
 });
+const standalone = resolve('apps/web/.next/standalone/apps/web');
+await mkdir(resolve(standalone, '.next'), { recursive: true });
+await cp(resolve('apps/web/.next/static'), resolve(standalone, '.next/static'), {
+  recursive: true,
+});
+await cp(resolve('apps/web/public'), resolve(standalone, 'public'), { recursive: true });
 const children = [
   spawn(process.execPath, ['services/api/src/index.js'], {
     env: { ...env, NODE_ENV: 'development' },
     stdio: 'inherit',
   }),
-  spawn(
-    process.execPath,
-    [next, 'start', 'apps/web', '--hostname', '127.0.0.1', '--port', '3000'],
-    { env: { ...env, NODE_ENV: 'production' }, stdio: 'inherit' },
-  ),
+  spawn(process.execPath, [resolve(standalone, 'server.js')], {
+    env: { ...env, NODE_ENV: 'production', HOSTNAME: '127.0.0.1', PORT: '3000' },
+    stdio: 'inherit',
+  }),
 ];
 let stopping = false;
 function stop(code = 0) {

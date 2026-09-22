@@ -47,7 +47,18 @@ import {
   Film,
   RefreshCw,
 } from 'lucide-react';
-import { API, api, Data, Diary, money, dateLabel, token, supabase, Transaction } from '@/lib/api';
+import {
+  API,
+  api,
+  Data,
+  Diary,
+  money,
+  dateLabel,
+  token,
+  supabase,
+  signOut,
+  Transaction,
+} from '@/lib/api';
 import Recorder from '@/components/Recorder';
 import Assistant from '@/components/Assistant';
 import Onboarding from '@/components/Onboarding';
@@ -144,12 +155,15 @@ export default function Page() {
     let closed = false;
     void token().then((t) => {
       if (closed) return;
-      socket = io(API, { auth: { token: t } });
+      socket = io(API, { auth: { token: t }, withCredentials: true });
       socket.on('connect', () => {
         setOnline(true);
         void load();
       });
-      socket.on('disconnect', () => setOnline(false));
+      socket.on('disconnect', (reason) => {
+        setOnline(false);
+        if (reason === 'io server disconnect') void api('/api/session').catch(() => {});
+      });
       socket.on('dashboard:update', () => void load());
     });
     return () => {
@@ -226,12 +240,13 @@ export default function Page() {
   }
   function exportCSV() {
     const rows = [
-      ['Date', 'Merchant', 'Category', 'Amount (USD)', 'Status'],
+      ['Date', 'Merchant', 'Category', 'Amount', 'Currency', 'Status'],
       ...transactions.map((t) => [
         t.date,
         t.name,
         t.category,
         (t.amount / 100).toFixed(2),
+        t.currency || 'USD',
         t.pending ? 'Pending' : 'Posted',
       ]),
     ];
@@ -322,8 +337,8 @@ export default function Page() {
           <div className="profile">
             <span className="profile-avatar">JD</span>
             <div>
-              <strong>{mode === 'demo' ? 'Jamie Davis' : 'Your personal space'}</strong>
-              <span>{mode === 'demo' ? 'Demo account' : 'Private account'}</span>
+              <strong>{'Your personal space'}</strong>
+              <span>{mode === 'demo' ? 'Local account' : 'Private account'}</span>
             </div>
             <button
               className="icon-btn"
@@ -380,11 +395,7 @@ export default function Page() {
                 {tab === 'Overview' ? 'YOUR DAILY DOSE OF CLARITY' : tab.toUpperCase()}
               </div>
               <h1>
-                {tab === 'Overview'
-                  ? mode === 'demo'
-                    ? 'Welcome back, Jamie'
-                    : 'Welcome back'
-                  : tab}
+                {tab === 'Overview' ? (mode === 'demo' ? 'Welcome back' : 'Welcome back') : tab}
                 <span className="heading-dot">.</span>
                 {tab === 'Overview' && <span className="greeting-sun">☀</span>}
               </h1>
@@ -457,8 +468,8 @@ export default function Page() {
               {mode === 'demo' && (
                 <div className="demo-bar">
                   <span>
-                    <span className="status-dot" /> A little preview of what’s possible. You’re
-                    exploring sample data.
+                    <span className="status-dot" /> Private local workspace. Imported balances
+                    reflect each statement’s closing date.
                   </span>
                   <button onClick={() => setConnect(true)}>
                     Connect your world <ArrowRight size={13} />
@@ -498,7 +509,7 @@ export default function Page() {
                           <Wallet size={17} />
                         </span>
                       </div>
-                      <h2>{money(s.profit)}</h2>
+                      <h2>{money(s.profit, s.currency)}</h2>
                       <div className="metric-foot">
                         <span className="profit-indicator">
                           <ArrowUpRight size={13} /> Your breathing room
@@ -519,7 +530,7 @@ export default function Page() {
                           <ArrowDownLeft size={18} />
                         </span>
                       </div>
-                      <h2>{money(s.income)}</h2>
+                      <h2>{money(s.income, s.currency)}</h2>
                       <div className="metric-foot">
                         <span className="tiny-dot green-bg" /> Money coming in{' '}
                         <svg viewBox="0 0 84 26">
@@ -534,7 +545,7 @@ export default function Page() {
                           <ArrowUpRight size={18} />
                         </span>
                       </div>
-                      <h2>{money(s.expenses)}</h2>
+                      <h2>{money(s.expenses, s.currency)}</h2>
                       <div className="metric-foot">
                         <span className="tiny-dot tan-bg" /> Intentional, one day at a time
                         <svg className="tan-line" viewBox="0 0 84 26">
@@ -549,7 +560,7 @@ export default function Page() {
                           <CreditCard size={17} />
                         </span>
                       </div>
-                      <h2>{money(s.debt)}</h2>
+                      <h2>{money(s.debt, s.currency)}</h2>
                       <div className="metric-foot">
                         <span className="tiny-dot lavender-bg" />
                         {data.accounts.filter((a) => a.type === 'credit').length} credit account
@@ -569,8 +580,8 @@ export default function Page() {
                         <strong>Payday looks good on you.</strong>
                         <span>
                           {' '}
-                          {money(-s.salary.amount)} arrived in your account. A fresh start for your
-                          goals.
+                          {money(-s.salary.amount, s.currency)} arrived in your account. A fresh
+                          start for your goals.
                         </span>
                       </div>
                       <button
@@ -601,7 +612,11 @@ export default function Page() {
                           </span>
                         </div>
                       </div>
-                      <Cashflow transactions={data.transactions} month={month} />
+                      <Cashflow
+                        transactions={data.transactions}
+                        month={month}
+                        currency={s.currency}
+                      />
                       <div className="chart-footer">
                         <span>
                           <Leaf size={14} /> Every bit you keep is a step forward.
@@ -629,7 +644,7 @@ export default function Page() {
                         <div className="donut" style={{ background: donut(s.spending) }}>
                           <div>
                             <span>Total spent</span>
-                            <strong>{money(s.expenses)}</strong>
+                            <strong>{money(s.expenses, s.currency)}</strong>
                             <span>{s.spending.length} categories</span>
                           </div>
                         </div>
@@ -648,7 +663,7 @@ export default function Page() {
                               >
                                 <span className="legend-dot" style={{ background: c.color }} />
                                 <span>{c.name}</span>
-                                <strong>{money(c.amount)}</strong>
+                                <strong>{money(c.amount, s.currency)}</strong>
                               </button>
                             ))}
                         </div>
@@ -697,7 +712,7 @@ export default function Page() {
                               <strong>{b.name}</strong>
                               <span>{b.status === 'overdue' ? 'Overdue' : b.category}</span>
                             </div>
-                            <strong>{money(b.amount)}</strong>
+                            <strong>{money(b.amount, s.currency)}</strong>
                           </div>
                         ))}
                         {!bills.length && (
@@ -788,8 +803,8 @@ export default function Page() {
                             </span>
                           </div>
                           <div className="budget-value">
-                            {money(spent)}
-                            <span> of {money(b.limit)}</span>
+                            {money(spent, s.currency)}
+                            <span> of {money(b.limit, s.currency)}</span>
                           </div>
                           <div className="budget-track">
                             <i
@@ -800,11 +815,11 @@ export default function Page() {
                             />
                           </div>
                           <div className="budget-details">
-                            <span>{money(Math.max(0, b.limit - spent))} left</span>
+                            <span>{money(Math.max(0, b.limit - spent), s.currency)} left</span>
                             <span>{pct}% used</span>
                           </div>
                           <label className="budget-edit">
-                            Monthly limit ($)
+                            Monthly limit ({s.currency})
                             <input
                               aria-label={b.category + ' budget'}
                               type="number"
@@ -846,7 +861,12 @@ export default function Page() {
                     </div>
                     <div className="card">
                       <span>Total to plan for</span>
-                      <h2>{money(bills.reduce((sum, b) => sum + b.amount, 0))}</h2>
+                      <h2>
+                        {money(
+                          bills.reduce((sum, b) => sum + b.amount, 0),
+                          s.currency,
+                        )}
+                      </h2>
                     </div>
                     <div className="card">
                       <span>Reminder preferences</span>
@@ -882,7 +902,7 @@ export default function Page() {
                           <span>{b.category}</span>
                         </div>
                         <span className={'status-chip ' + b.status}>{b.status}</span>
-                        <strong>{money(b.amount)}</strong>
+                        <strong>{money(b.amount, s.currency)}</strong>
                       </div>
                     ))}
                     {!s.bills.length && (
@@ -968,6 +988,7 @@ export default function Page() {
                                 try {
                                   const auth = await token();
                                   const result = await fetch(API + `/api/diary/${d.id}/audio`, {
+                                    credentials: 'include',
                                     headers: { Authorization: 'Bearer ' + auth },
                                   });
                                   if (!result.ok) throw new Error('Audio unavailable');
@@ -998,8 +1019,8 @@ export default function Page() {
                   <div className="info-strip">
                     <ShieldCheck size={19} />
                     <span>
-                      Your bank credentials never touch FinSight. Connections use read-only access
-                      through Plaid.
+                      Statement imports stay in your workspace. Balances reflect the statement date;
+                      bank connections use read-only access.
                     </span>
                   </div>
                   <div className="accounts-grid">
@@ -1008,7 +1029,11 @@ export default function Page() {
                         <div>
                           <Landmark size={25} />
                           <span className="status-chip">
-                            {mode === 'demo' ? 'Sample account' : 'Connected'}
+                            {a.balanceAsOf
+                              ? `Statement · ${a.balanceAsOf}`
+                              : mode === 'demo'
+                                ? 'Sample account'
+                                : 'Connected'}
                           </span>
                         </div>
                         <span className="eyebrow">
@@ -1019,12 +1044,14 @@ export default function Page() {
                               : 'CHECKING'}
                         </span>
                         <h3>{a.name}</h3>
-                        <span className="account-mask">•••• &nbsp; •••• &nbsp; {a.mask}</span>
+                        <span className="account-mask">
+                          •••• &nbsp; •••• &nbsp; {a.mask} &nbsp; {a.currency}
+                        </span>
                         <div className="account-balance">
                           <span>
                             {a.type === 'credit' ? 'Outstanding balance' : 'Current balance'}
                           </span>
-                          <strong>{money(a.balance)}</strong>
+                          <strong>{money(a.balance, a.currency)}</strong>
                         </div>
                       </article>
                     ))}
@@ -1157,10 +1184,17 @@ export default function Page() {
                   <div className="setting-row">
                     <div>
                       <strong>Account & security</strong>
-                      <p>Google sign-in and authenticator-based verification.</p>
+                      <p>
+                        {mode === 'demo'
+                          ? 'Password-protected local access.'
+                          : 'Google sign-in and authenticator-based verification.'}
+                      </p>
                     </div>
-                    <button className="button" onClick={() => setConnect(true)}>
-                      Manage security <ShieldCheck size={15} />
+                    <button
+                      className="button"
+                      onClick={() => window.dispatchEvent(new Event('finsight-security'))}
+                    >
+                      Change password <ShieldCheck size={15} />
                     </button>
                   </div>
                   <div className="setting-row">
@@ -1168,29 +1202,35 @@ export default function Page() {
                       <strong>Session</strong>
                       <p>
                         {mode === 'demo'
-                          ? 'You’re using a local demo account.'
+                          ? 'You’re using a password-protected local account.'
                           : 'Your session is stored in memory.'}
                       </p>
                     </div>
-                    {mode === 'live' && (
+                    {
                       <button
                         className="button"
                         onClick={async () => {
-                          await supabase?.auth.signOut();
-                          setData(null);
-                          setConnect(true);
+                          try {
+                            await signOut();
+                          } catch (e) {
+                            notify((e as Error).message);
+                          }
                         }}
                       >
                         Sign out
                       </button>
-                    )}
+                    }
                   </div>
                 </section>
               )}
               <footer className="page-footer">
                 <span>
                   <span className="tiny-dot green-bg" />
-                  {mode === 'demo' ? 'Sample data · USD' : 'All amounts in USD'}
+                  {(data?.currencies?.length || 0) > 1
+                    ? `${mode === 'demo' ? 'Local data' : 'Showing'} ${s?.currency || 'USD'} (also has ${data!.currencies.filter((c) => c !== s?.currency).join(', ')})`
+                    : mode === 'demo'
+                      ? `Local data · ${s?.currency || 'USD'}`
+                      : `All amounts in ${s?.currency || 'USD'}`}
                   <span className="footer-divider">/</span>Made for your peace of mind.
                 </span>
                 <span>
@@ -1233,6 +1273,7 @@ export default function Page() {
       {connect && <Onboarding mode={mode} onClose={() => setConnect(false)} onComplete={load} />}
       {billModal && (
         <BillModal
+          currency={s?.currency || 'USD'}
           onClose={() => setBillModal(false)}
           onSave={async (b) => {
             await api('/api/bills', { method: 'POST', body: JSON.stringify(b) });
@@ -1302,11 +1343,21 @@ function donut(spending: { color: string; amount: number }[]) {
         ')'
     : '#eee';
 }
-function Cashflow({ transactions, month }: { transactions: Transaction[]; month: string }) {
+function Cashflow({
+  transactions,
+  month,
+  currency,
+}: {
+  transactions: Transaction[];
+  month: string;
+  currency: string;
+}) {
+  // Scoped to one currency so a mixed USD/INR account set never sums into one meaningless bar.
+  const currencyTransactions = transactions.filter((t) => (t.currency || 'USD') === currency);
   const groups = Array.from({ length: 6 }, (_, i) => {
     const start = i * 5 + 1,
       end = i === 5 ? 31 : start + 4;
-    const t = transactions.filter(
+    const t = currencyTransactions.filter(
       (t) =>
         t.date.startsWith(month) &&
         Number(t.date.slice(8)) >= start &&
@@ -1320,11 +1371,17 @@ function Cashflow({ transactions, month }: { transactions: Transaction[]; month:
     };
   });
   const max = Math.max(10000, ...groups.map((g) => Math.max(g.income, g.expense)));
+  const axisLabel = (cents: number) =>
+    new Intl.NumberFormat(currency === 'INR' ? 'en-IN' : 'en-US', {
+      style: 'currency',
+      currency,
+      maximumFractionDigits: 0,
+    }).format(cents / 100);
   return (
     <div className="bar-chart">
       <div className="chart-y">
         {[1, 0.75, 0.5, 0.25, 0].map((x) => (
-          <span key={x}>${Math.round((max * x) / 100).toLocaleString()}</span>
+          <span key={x}>{axisLabel(Math.round(max * x))}</span>
         ))}
       </div>
       <div className="chart-plot">
@@ -1340,12 +1397,12 @@ function Cashflow({ transactions, month }: { transactions: Transaction[]; month:
                 <div
                   className="chart-bar income"
                   style={{ height: Math.max(2, (g.income / max) * 100) + '%' }}
-                  title={'Income: ' + money(g.income)}
+                  title={'Income: ' + money(g.income, currency)}
                 />
                 <div
                   className="chart-bar expense"
                   style={{ height: Math.max(2, (g.expense / max) * 100) + '%' }}
-                  title={'Expenses: ' + money(g.expense)}
+                  title={'Expenses: ' + money(g.expense, currency)}
                 />
               </div>
               <span>{g.label}</span>
@@ -1397,7 +1454,7 @@ function TransactionTable({
               <td>{dateLabel(t.date)}</td>
               <td className={'amount ' + (t.amount < 0 ? 'positive' : '')}>
                 {t.amount < 0 ? '+' : '−'}
-                {money(Math.abs(t.amount))}
+                {money(Math.abs(t.amount), t.currency)}
               </td>
             </tr>
           ))}
@@ -1410,9 +1467,11 @@ function TransactionTable({
   );
 }
 function BillModal({
+  currency,
   onClose,
   onSave,
 }: {
+  currency: string;
   onClose: () => void;
   onSave: (b: { name: string; amount: number; due: string; category: string }) => Promise<void>;
 }) {
@@ -1469,7 +1528,7 @@ function BillModal({
           />
         </label>
         <label className="form-label">
-          Amount ($)
+          Amount ({currency})
           <input
             required
             type="number"

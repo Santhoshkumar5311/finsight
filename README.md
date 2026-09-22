@@ -2,7 +2,7 @@
 
 A personal finance diary with a Next.js dashboard, Expo mobile client, Express API, PostgreSQL/pgvector, Plaid, GPT-4o, Whisper, Redis, RabbitMQ and KMS-encrypted S3 audio.
 
-The local demo runs without credentials. Live adapters are implemented but require your own services, credentials and deployment configuration. Production latency, physical-device behavior, and live provider integration are not certified by the local tests.
+Local mode needs no external service credentials; create your own password-protected login on first launch. Live adapters are implemented but require your own services, credentials and deployment configuration. Production latency, physical-device behavior, and live provider integration are not certified by the local tests.
 
 ## Run the web app and API
 
@@ -14,13 +14,14 @@ npm ci
 npm run local
 ```
 
-Open **http://localhost:3000**. The API listens on **http://localhost:4000**. Local data persists encrypted in `.data/demo.json`, with an owner-only key in `.data/demo.json.key`; bank accounts and transactions are synthetic. No external API is called in demo mode. Written diary entries, budgets, bills and preferences persist. Written reflections and audio recordings save locally with encrypted storage and playback; real transcription explicitly requires live services. See [local setup and backup/restore](docs/LOCAL.md). Use `npm run dev` for hot-reloading development.
+Open **http://localhost:3000/login** and create your local owner account. The API listens on **http://localhost:4000**. Local data persists encrypted in `.data/demo.json`, with an owner-only key in `.data/demo.json.key`; bank accounts and transactions are synthetic. No external API is called in demo mode. Written diary entries, budgets, bills and preferences persist. Written reflections and audio recordings save locally with encrypted storage and playback; real transcription explicitly requires live services. See [local setup and backup/restore](docs/LOCAL.md). Use `npm run dev` for hot-reloading development.
 
 Try these flows:
 
 - Overview → weekly/monthly spending and previous/next months.
 - Transactions → search, category filter and CSV export.
 - Accounts → **Simulate a new transaction** → watch totals update without refresh.
+- Accounts → **Bring another account in** → India → ICICI Bank → import a statement CSV (or try the sandbox connection if `AA_SANDBOX_ENABLED=true`). See [docs/INDIA_BANKING.md](docs/INDIA_BANKING.md).
 - Budgets → adjust a limit or regenerate from prior months.
 - Bills & reminders → add a bill; posted transactions automatically reconcile its status.
 - Money diary → record locally or save a written reflection; search your entries.
@@ -35,10 +36,11 @@ apps/
   mobile/              Expo native client, independent lockfile
 services/api/
   src/                 Auth, Plaid, jobs, agent, diary, notifications
-  test/                Finance, crypto, PII, webhook and PostgreSQL/RLS tests
+  src/providers/       Banking-provider abstraction: Plaid, India AA sandbox, ICICI statement import
+  test/                Finance, crypto, PII, webhook, provider and PostgreSQL/RLS tests
   integration/         Isolated HTTP and WebSocket tests
-packages/core/          Deterministic financial intelligence
-database/             PostgreSQL and pgvector migration
+packages/core/          Deterministic financial intelligence (currency-scoped, not USD-only)
+database/             PostgreSQL and pgvector migrations
 infra/                 Dockerfiles, TLS, IAM, private storage and WAF configuration
 docs/                  Architecture, security and API reference
 ```
@@ -46,7 +48,7 @@ docs/                  Architecture, security and API reference
 ## Implementation sequence
 
 1. **Scaffold:** npm workspaces for web/API/core; separate Expo dependency tree. `npm run dev` runs the demo end to end.
-2. **Database:** `database/001_schema.sql` creates all tables, indexes, pgvector, RLS and agent grants. `npm test` executes this migration twice in embedded PostgreSQL, then tests ownership and permissions.
+2. **Database:** `database/001_schema.sql` creates all tables, indexes, pgvector, RLS and agent grants; `database/002_india_provider.sql` adds a `provider` dimension (Plaid/India AA/ICICI statement) and a `statement_imports` audit table, additively. `npm test` executes both migrations twice in embedded PostgreSQL, then tests ownership and permissions.
 3. **Plaid:** Link token creation requests 90 days; exchange encrypts the access token with KMS. Verified webhooks feed a durable inbox and RabbitMQ. Sync handles pagination, additions, modifications, removals and pending replacements atomically.
 4. **Agent:** deterministic categorization, income, debt, bill and anomaly calculations precede Socket.io updates. GPT-4o gets scoped function tools, not arbitrary SQL or banking writes. Budget generation and chat are functional in demo mode using local calculations; general LLM responses require live mode.
 5. **Diary:** Web Audio waveform and noise suppression; Whisper transcription; private PII analysis; AI topic tags, same-day transaction cross-reference, pgvector search and S3 SSE-KMS audio. Native recording uses metering and Android voice-communication processing.
@@ -85,7 +87,11 @@ NEXT_PUBLIC_SUPABASE_ANON_KEY=YOUR_PUBLIC_ANON_KEY
 
 ### Plaid
 
-Set the client ID, secret and environment. Use Sandbox first. Configure a public HTTPS webhook endpoint ending in `/webhooks/plaid`; a local development tunnel may expose that route to Plaid. The app requests US institutions and USD transactions. A history import can remain in progress while Plaid retrieves bank history; completion is based on Plaid’s historical sync status, not a fabricated percentage. First connect starts an initial sync; later webhooks continue it.
+Set the client ID, secret and environment. Use Sandbox first. Configure a public HTTPS webhook endpoint ending in `/webhooks/plaid`; a local development tunnel may expose that route to Plaid. Plaid Link is configured to request US institutions (`country_codes: ['US']`); ingestion keeps whatever currency Plaid reports for a linked account rather than assuming USD. A history import can remain in progress while Plaid retrieves bank history; completion is based on Plaid’s historical sync status, not a fabricated percentage. First connect starts an initial sync; later webhooks continue it.
+
+### India (ICICI Bank)
+
+There is no live Account Aggregator/TSP integration in this codebase — see [docs/INDIA_BANKING.md](docs/INDIA_BANKING.md) for what that would require. What works today, in both demo and live mode: importing an ICICI NetBanking statement CSV via Accounts → India → ICICI Bank, or `POST /api/accounts/import/icici`. Setting `AA_SANDBOX_ENABLED=true` (never in production; `config.js` refuses to start otherwise) additionally exposes a fixture-data Account Aggregator sandbox so the consent/fetch architecture can be exercised end to end without a real bank.
 
 ### OpenAI, S3 and KMS
 
@@ -137,3 +143,11 @@ Build the web app with `npm run build`; run it with `npm run start -w @finsight/
 The two-second webhook update and one-second LLM response requirements are **SLO targets, not guarantees**. Financial calculation responses are local and fast; general GPT-4o answers and Plaid history retrieval depend on remote services. Plaid is not a continuous bank transaction stream. See `docs/ARCHITECTURE.md` for calculation semantics, delivery behavior, and the distinction between bank freshness and webhook processing latency.
 
 Sources used for the adapters: [Plaid transactions](https://plaid.com/docs/transactions/), [Plaid webhook verification](https://plaid.com/docs/api/webhooks/webhook-verification/), [OpenAI function calling](https://developers.openai.com/api/docs/guides/function-calling), [OpenAI transcription](https://developers.openai.com/api/docs/guides/speech-to-text), [Expo audio](https://docs.expo.dev/versions/latest/sdk/audio/), [Expo notifications](https://docs.expo.dev/push-notifications/sending-notifications/), [PGlite extensions](https://pglite.dev/extensions/), [Presidio installation](https://microsoft.github.io/presidio/installation/).
+
+## Personal statements and local AI
+
+Install Python 3.10+ and run `npm run setup:imports`. Accounts → Import accepts ICICI credit-card PDFs, transaction-history XLS and normalized CSV. PDFs/XLS must reconcile before import; repeated imports upsert stable transaction IDs and older statements cannot replace newer balances. Imported balances are snapshots, not live bank balances. No statement originals are persisted by the upload endpoint.
+
+For a separate personal workspace, set `DEMO_DATA_FILE=.data/personal.json` and independent random `PII_TOKEN_KEY`/`CHECKSUM_KEY` in your private `.env`. Stop the API and use `npm run import:statements -- /path/to/statement.pdf /path/to/history.xls`; this creates an empty encrypted workspace instead of mixing sample accounts. Preserve these keys and the store's adjacent encryption key.
+
+See [authentication and recovery](docs/AUTHENTICATION.md), [local models and Prime Agent](docs/LOCAL_AI.md), and [production deployment gates](docs/PRODUCTION.md). `npm run release:check` runs web types, unit/security/database tests, HTTP/socket tests and a production web build.

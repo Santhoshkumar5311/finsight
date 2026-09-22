@@ -135,4 +135,5 @@ export function startReminders() {
     }
   }, 30000);
   timer.unref();
+  return () => clearInterval(timer);
 }

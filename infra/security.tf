@@ -136,3 +136,49 @@ resource "aws_wafv2_web_acl_association" "edge" {
 output "audio_bucket" { value = aws_s3_bucket.audio.id }
 output "kms_key_arn" { value = aws_kms_key.financial_data.arn }
 output "private_database_endpoint" { value = aws_db_instance.database.address }
+
+variable "audit_bucket_name" { type = string }
+resource "aws_s3_bucket" "audit" {
+  bucket = var.audit_bucket_name
+  object_lock_enabled = true
+}
+resource "aws_s3_bucket_versioning" "audit" {
+  bucket = aws_s3_bucket.audit.id
+  versioning_configuration { status = "Enabled" }
+}
+resource "aws_s3_bucket_object_lock_configuration" "audit" {
+  bucket = aws_s3_bucket.audit.id
+  depends_on = [aws_s3_bucket_versioning.audit]
+  rule {
+    default_retention {
+      mode = "GOVERNANCE"
+      days = 90
+    }
+  }
+}
+resource "aws_s3_bucket_public_access_block" "audit" {
+  bucket = aws_s3_bucket.audit.id
+  block_public_acls = true
+  block_public_policy = true
+  ignore_public_acls = true
+  restrict_public_buckets = true
+}
+resource "aws_s3_bucket_server_side_encryption_configuration" "audit" {
+  bucket = aws_s3_bucket.audit.id
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "aws:kms"
+      kms_master_key_id = aws_kms_key.financial_data.arn
+    }
+    bucket_key_enabled = true
+  }
+}
+resource "aws_s3_bucket_policy" "audit" {
+  bucket = aws_s3_bucket.audit.id
+  policy = jsonencode({Version="2012-10-17",Statement=[
+    {Sid="DenyInsecureTransport",Effect="Deny",Principal="*",Action="s3:*",Resource=[aws_s3_bucket.audit.arn,"${aws_s3_bucket.audit.arn}/*"],Condition={Bool={"aws:SecureTransport"="false"}}},
+    {Sid="RequireKMSWrites",Effect="Deny",Principal="*",Action="s3:PutObject",Resource="${aws_s3_bucket.audit.arn}/*",Condition={StringNotEquals={"s3:x-amz-server-side-encryption"="aws:kms"}}},
+    {Sid="RequireDesignatedKey",Effect="Deny",Principal="*",Action="s3:PutObject",Resource="${aws_s3_bucket.audit.arn}/*",Condition={StringNotEquals={"s3:x-amz-server-side-encryption-aws-kms-key-id"=aws_kms_key.financial_data.arn}}}
+  ]})
+}
+output "audit_bucket" { value = aws_s3_bucket.audit.id }

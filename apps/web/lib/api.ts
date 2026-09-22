@@ -15,6 +15,7 @@ export async function api(path: string, options: RequestInit = {}) {
   const auth = await token();
   const result = await fetch(API + path, {
     ...options,
+    credentials: 'include',
     headers: {
       ...(options.body instanceof FormData ? {} : { 'Content-Type': 'application/json' }),
       ...(auth ? { Authorization: 'Bearer ' + auth } : {}),
@@ -22,11 +23,22 @@ export async function api(path: string, options: RequestInit = {}) {
     },
   });
   const data = await result.json();
-  if (!result.ok) throw new Error(data.error || 'Request failed');
+  if (!result.ok) {
+    if (
+      path.startsWith('/api/') &&
+      [401, 403].includes(result.status) &&
+      typeof window !== 'undefined'
+    )
+      window.dispatchEvent(new Event('finsight-auth-lost'));
+    throw new Error(data.error || 'Request failed');
+  }
   return data;
 }
-export const money = (cents: number) =>
-  new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(cents / 100);
+const currencyLocales: Record<string, string> = { USD: 'en-US', INR: 'en-IN' };
+export const money = (cents: number, currency = 'USD') =>
+  new Intl.NumberFormat(currencyLocales[currency], { style: 'currency', currency }).format(
+    cents / 100,
+  );
 export const dateLabel = (date: string) =>
   new Date(date.slice(0, 10) + 'T12:00:00').toLocaleDateString('en-US', {
     month: 'short',
@@ -40,6 +52,7 @@ export type Transaction = {
   category: string;
   accountId: string;
   pending: boolean;
+  currency: string;
 };
 export type Bill = {
   id: string;
@@ -59,12 +72,14 @@ export type Diary = {
 };
 export type Data = {
   mode: string;
+  currencies: string[];
   accounts: {
     id: string;
     name: string;
     type: string;
     mask: string;
     balance: number;
+    balanceAsOf?: string;
     currency: string;
   }[];
   transactions: Transaction[];
@@ -73,6 +88,7 @@ export type Data = {
   budgets: { category: string; limit: number }[];
   preferences: { leadHours: number[]; notifications: boolean };
   summary: {
+    currency: string;
     income: number;
     expenses: number;
     debt: number;
@@ -87,3 +103,12 @@ export type Data = {
     alerts: { id: string; title: string; detail: string }[];
   };
 };
+
+export async function signOut() {
+  await api('/api/session/logout', { method: 'POST' });
+  if (supabase) {
+    const result = await supabase.auth.signOut({ scope: 'local' });
+    if (result.error) throw result.error;
+  }
+  window.dispatchEvent(new Event('finsight-auth-lost'));
+}

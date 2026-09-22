@@ -6,32 +6,25 @@ import {
   timingSafeEqual,
 } from 'node:crypto';
 import { KMSClient, GenerateDataKeyCommand, DecryptCommand } from '@aws-sdk/client-kms';
-import { createRemoteJWKSet, jwtVerify } from 'jose';
+import { createRemoteJWKSet } from 'jose';
 import { live } from './config.js';
+import { authenticateLocal } from './local-auth.js';
+import { isRevoked } from './session-cache.js';
+import { verifyBankingToken } from './jwt-auth.js';
 export const DEMO_USER = '00000000-0000-4000-8000-000000000001';
 const kms = new KMSClient({ region: process.env.AWS_REGION || 'us-east-1' });
 const jwks = live
   ? createRemoteJWKSet(new URL(process.env.SUPABASE_URL + '/auth/v1/.well-known/jwks.json'))
   : null;
-export async function authenticate(token) {
-  if (!live) return { id: DEMO_USER, aal: 'demo' };
-  if (!token) throw Object.assign(new Error('Sign in to continue'), { status: 401 });
-  try {
-    const { payload } = await jwtVerify(token, jwks, {
-      issuer: process.env.SUPABASE_URL + '/auth/v1',
-      audience: process.env.SUPABASE_JWT_AUDIENCE || 'authenticated',
-      algorithms: ['ES256', 'RS256'],
-    });
-    if (!payload.sub || typeof payload.exp !== 'number' || payload.role !== 'authenticated')
-      throw new Error('Invalid user');
-    if (payload.aal !== 'aal2')
-      throw Object.assign(new Error('Complete TOTP verification'), { status: 403 });
-    return { id: payload.sub, aal: payload.aal, expiresAt: payload.exp * 1000 };
-  } catch (e) {
-    if (e.status) throw e;
-    throw Object.assign(new Error('Session expired or invalid'), { status: 401 });
-  }
+export async function authenticate(token, cookie, touch = true) {
+  if (!live) return authenticateLocal(cookie, touch);
+  return verifyBankingToken(token, jwks, {
+    issuer: process.env.SUPABASE_URL + '/auth/v1',
+    audience: process.env.SUPABASE_JWT_AUDIENCE || 'authenticated',
+    revoked: isRevoked,
+  });
 }
+
 export function tokenise(value) {
   return createHmac('sha256', process.env.PII_TOKEN_KEY || 'demo-only-not-a-production-key')
     .update(value)

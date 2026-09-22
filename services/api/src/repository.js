@@ -1,17 +1,33 @@
 import pg from 'pg';
+import { databaseOptions } from './database-config.js';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { categorize } from '@finsight/core';
 import { localStore } from './local-store.js';
 import { live } from './config.js';
 import { seed } from './seed.js';
 import { verifyChecksum } from './security.js';
-export const pool = live
-  ? new pg.Pool({ connectionString: process.env.DATABASE_URL, max: 15 })
-  : null;
+import { privateText } from './privacy.js';
+import { writeNormalized } from './providers/ingest.js';
+export const pool = live ? new pg.Pool(databaseOptions()) : null;
 const path =
   process.env.DEMO_DATA_FILE || fileURLToPath(new URL('../../../.data/demo.json', import.meta.url));
 let demo, store;
 export async function initStore() {
+  if (live && process.env.NODE_ENV === 'production') {
+    const role = process.env.SERVICE_ROLE === 'worker' ? 'finsight_worker' : 'finsight_api';
+    const { rows } = await pool.query(
+      "SELECT rolsuper,rolbypassrls,pg_has_role(current_user,$1,'MEMBER') AS member FROM pg_roles WHERE rolname=current_user",
+      [role],
+    );
+    if (!rows[0]?.member || rows[0].rolsuper || rows[0].rolbypassrls)
+      throw new Error('Use a restricted runtime database identity with the matching FinSight role');
+    const owned = await pool.query(
+      "SELECT 1 FROM pg_tables WHERE schemaname='public' AND tableowner=current_user LIMIT 1",
+    );
+    if (owned.rowCount)
+      throw new Error('Runtime database identity must not own application tables');
+  }
   if (!live) {
     store = await localStore(path);
     try {
@@ -51,7 +67,8 @@ export async function state(user) {
     await c.query('INSERT INTO profiles(user_id) VALUES($1) ON CONFLICT DO NOTHING', [user]);
     const result = {};
     for (const [name, sql] of Object.entries({
-      accounts: 'SELECT id,name,type,mask,balance,currency FROM accounts WHERE user_id=$1',
+      accounts:
+        'SELECT id,name,type,mask,balance,balance_as_of::text AS "balanceAsOf",currency FROM accounts WHERE user_id=$1',
       transactions:
         'SELECT id,name,amount,date::text,category,account_id AS "accountId",pending,transfer,currency FROM transactions WHERE user_id=$1 ORDER BY date DESC',
       bills: 'SELECT id,name,amount,due::text,category,status FROM bills WHERE user_id=$1',
@@ -240,4 +257,96 @@ export async function deleteSubscription(user, id) {
 export function localDiaryAudio(id) {
   if (live) return null;
   return demo.diaries.find((entry) => entry.id === id)?.localAudio;
+}
+
+export async function getAccount(user, accountId) {
+  if (!live) return demo.accounts.find((a) => a.id === accountId) || null;
+  return (
+    (
+      await scoped(user, (c) =>
+        c.query(
+          'SELECT id,name,mask,balance,currency,balance_as_of::text AS "balanceAsOf" FROM accounts WHERE id=$1 AND user_id=$2',
+          [accountId, user],
+        ),
+      )
+    ).rows[0] || null
+  );
+}
+
+/**
+ * Shared demo/live write path for a normalized account + its transactions (used by
+ * ICICI statement import). Mirrors the `if (!live) {...} return scoped(...)` pattern
+ * used elsewhere in this file so callers don't branch on mode themselves. Live-mode
+ * writes go through `providers/ingest.js`'s `writeNormalized`, the same code Plaid
+ * uses, so both providers share one upsert/redaction path.
+ * @param {import('./providers/types.js').NormalizedAccount} accountMeta
+ * @param {import('./providers/types.js').NormalizedTransaction[]} transactions
+ */
+export async function importTransactions(
+  user,
+  accountMeta,
+  transactions,
+  { sourceHash, skipped = 0 } = {},
+) {
+  if (!live) {
+    const demoAccount = {
+      id: accountMeta.accountId,
+      name: accountMeta.accountName,
+      institution: accountMeta.institution,
+      type: accountMeta.accountType,
+      mask: accountMeta.maskedNumber,
+      balance: accountMeta.currentBalance,
+      balanceAsOf: accountMeta.balanceDate,
+      currency: accountMeta.currency,
+      provider: accountMeta.provider,
+    };
+    const accountIndex = demo.accounts.findIndex((a) => a.id === demoAccount.id);
+    if (accountIndex === -1) demo.accounts.push(demoAccount);
+    else {
+      const previous = demo.accounts[accountIndex];
+      if (
+        previous.balanceAsOf &&
+        demoAccount.balanceAsOf &&
+        previous.balanceAsOf > demoAccount.balanceAsOf
+      ) {
+        demoAccount.balance = previous.balance;
+        demoAccount.balanceAsOf = previous.balanceAsOf;
+      }
+      demo.accounts[accountIndex] = { ...previous, ...demoAccount };
+    }
+    const indexById = new Map(demo.transactions.map((t, i) => [t.id, i]));
+    for (const t of transactions) {
+      const name = await privateText(t.merchant || t.description);
+      const row = {
+        id: t.transactionId,
+        name,
+        amount: t.amount,
+        date: t.date,
+        category: categorize(name, t.category || ''),
+        accountId: t.accountId,
+        pending: t.pending,
+        transfer: t.transfer || false,
+        currency: t.currency,
+        provider: t.provider,
+      };
+      if (indexById.has(row.id)) demo.transactions[indexById.get(row.id)] = row;
+      else demo.transactions.push(row);
+    }
+    return persist();
+  }
+  await scoped(user, async (c) => {
+    await writeNormalized(c, user, [accountMeta], transactions);
+    if (sourceHash)
+      await c.query(
+        'INSERT INTO statement_imports(user_id,account_id,provider,source_hash,row_count,skipped_count) VALUES($1,$2,$3,$4,$5,$6)',
+        [
+          user,
+          accountMeta.accountId,
+          accountMeta.provider,
+          sourceHash,
+          transactions.length,
+          skipped,
+        ],
+      );
+  });
 }

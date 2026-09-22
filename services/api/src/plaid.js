@@ -2,9 +2,8 @@ import { PlaidApi, Configuration, PlaidEnvironments } from 'plaid';
 import { decodeProtectedHeader, importJWK, jwtVerify } from 'jose';
 import { createHash, timingSafeEqual } from 'node:crypto';
 import { pool, scoped, audit } from './repository.js';
-import { encryptSecret, decryptSecret, tokenise, redact } from './security.js';
-import { categorize } from '@finsight/core';
-import { privateText } from './privacy.js';
+import { encryptSecret, decryptSecret, tokenise } from './security.js';
+import { writeNormalized } from './providers/ingest.js';
 export const plaid = new PlaidApi(
   new Configuration({
     basePath: PlaidEnvironments[process.env.PLAID_ENV || 'sandbox'],
@@ -104,66 +103,50 @@ export async function syncItem(itemId) {
       }
     }
     const { data: accountData } = await plaid.accountsGet({ access_token: token });
-    const names = [
-      ...new Set(
-        [...added, ...modified]
-          .map((t) => t.merchant_name || t.name)
-          .concat(accountData.accounts.map((a) => a.name)),
+    // A currency other than USD is no longer dropped: summarize()/money() are currency-scoped
+    // per packages/core, so accounts/transactions in any currency Plaid reports are safe to keep.
+    const normalizedAccounts = accountData.accounts.map((a) => ({
+      provider: 'plaid',
+      itemId,
+      accountId: tokenise(a.account_id),
+      institution: 'Plaid',
+      accountName: a.name,
+      accountType: a.type,
+      accountSubtype: a.subtype || null,
+      maskedNumber: a.mask || '••••',
+      currency: a.balances.iso_currency_code || a.balances.unofficial_currency_code || 'USD',
+      currentBalance: Math.round((a.balances.current || 0) * 100),
+      availableBalance:
+        a.balances.available != null ? Math.round(a.balances.available * 100) : null,
+    }));
+    const normalizedTransactions = [...added, ...modified].map((t) => ({
+      provider: 'plaid',
+      transactionId: tokenise(t.transaction_id),
+      replacesTransactionId: t.pending_transaction_id
+        ? tokenise(t.pending_transaction_id)
+        : undefined,
+      accountId: tokenise(t.account_id),
+      date: t.date,
+      description: t.name,
+      merchant: t.merchant_name || t.name,
+      amount: Math.round(t.amount * 100),
+      currency: t.iso_currency_code || t.unofficial_currency_code || 'USD',
+      pending: t.pending,
+      transfer: /TRANSFER_IN|TRANSFER_OUT|LOAN_PAYMENTS/.test(
+        t.personal_finance_category?.primary || '',
       ),
-    ];
-    const safeNames = new Map();
-    for (let i = 0; i < names.length; i += 8)
-      await Promise.all(
-        names.slice(i, i + 8).map(async (name) => safeNames.set(name, await privateText(name))),
-      );
+      category: t.personal_finance_category?.primary || '',
+      status: t.pending ? 'pending' : 'posted',
+    }));
+    const removedTransactionIds = removed.map((t) => tokenise(t.transaction_id));
     await scoped(item.user_id, async (c) => {
-      for (const a of accountData.accounts) {
-        if (a.balances.iso_currency_code !== 'USD') continue;
-        await c.query(
-          'INSERT INTO accounts(id,user_id,item_id,name,type,mask,balance,currency) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(id) DO UPDATE SET balance=$7,name=$4 WHERE accounts.user_id=$2',
-          [
-            tokenise(a.account_id),
-            item.user_id,
-            itemId,
-            safeNames.get(a.name),
-            a.type,
-            a.mask || '••••',
-            Math.round((a.balances.current || 0) * 100),
-            'USD',
-          ],
-        );
-      }
-      for (const t of [...added, ...modified]) {
-        if (t.iso_currency_code !== 'USD') continue;
-        const name = safeNames.get(t.merchant_name || t.name),
-          primary = t.personal_finance_category?.primary || '';
-        if (t.pending_transaction_id)
-          await c.query('DELETE FROM transactions WHERE id=$1 AND user_id=$2', [
-            tokenise(t.pending_transaction_id),
-            item.user_id,
-          ]);
-        await c.query(
-          'INSERT INTO transactions(id,user_id,account_id,name,amount,date,category,pending,transfer,primary_category,currency) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) ON CONFLICT(id) DO UPDATE SET name=$4,amount=$5,date=$6,category=$7,pending=$8,transfer=$9,primary_category=$10,updated_at=now() WHERE transactions.user_id=$2',
-          [
-            tokenise(t.transaction_id),
-            item.user_id,
-            tokenise(t.account_id),
-            name,
-            Math.round(t.amount * 100),
-            t.date,
-            categorize(name, primary),
-            t.pending,
-            /TRANSFER_IN|TRANSFER_OUT|LOAN_PAYMENTS/.test(primary),
-            primary,
-            'USD',
-          ],
-        );
-      }
-      for (const t of removed)
-        await c.query('DELETE FROM transactions WHERE id=$1 AND user_id=$2', [
-          tokenise(t.transaction_id),
-          item.user_id,
-        ]);
+      await writeNormalized(
+        c,
+        item.user_id,
+        normalizedAccounts,
+        normalizedTransactions,
+        removedTransactionIds,
+      );
       await c.query(
         'UPDATE bank_items SET cursor=$2,import_status=$3,updated_at=now() WHERE id=$1',
         [

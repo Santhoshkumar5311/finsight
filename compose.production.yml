@@ -1,0 +1,107 @@
+# Live deployment template. Requires external private PostgreSQL/Redis/RabbitMQ,
+# Supabase Auth, S3/KMS, and explicit production secrets. Never use with demo mode.
+services:
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: ${WEB_API_URL:?Set the HTTPS API URL}
+        NEXT_PUBLIC_SUPABASE_URL: ${SUPABASE_URL:?Set Supabase URL}
+        NEXT_PUBLIC_SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY:?Set public anon key}
+    restart: unless-stopped
+    read_only: true
+    tmpfs: ['/tmp']
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
+    healthcheck:
+      test:
+        [
+          CMD,
+          node,
+          -e,
+          "fetch('http://127.0.0.1:3000/login').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks: [application]
+  api:
+    build:
+      context: .
+      dockerfile: services/api/Dockerfile
+    env_file: .env.production
+    environment:
+      NODE_ENV: production
+      APP_MODE: live
+      SERVICE_ROLE: api
+      DATABASE_URL: ${API_DATABASE_URL:?Set restricted API database URL}
+      DATABASE_SSL_CA: /run/secrets/database-ca.pem
+      AA_SANDBOX_ENABLED: 'false'
+    volumes: ['${DATABASE_CA_FILE:?Set path to database CA}:/run/secrets/database-ca.pem:ro']
+    restart: unless-stopped
+    read_only: true
+    tmpfs: ['/tmp']
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
+    healthcheck:
+      test:
+        [
+          CMD,
+          node,
+          -e,
+          "fetch('http://127.0.0.1:4000/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks: [application]
+  worker:
+    build:
+      context: .
+      dockerfile: services/api/Dockerfile
+    command: [node, services/api/src/worker.js]
+    env_file: .env.production
+    environment:
+      NODE_ENV: production
+      APP_MODE: live
+      SERVICE_ROLE: worker
+      DATABASE_URL: ${WORKER_DATABASE_URL:?Set restricted worker database URL}
+      DATABASE_SSL_CA: /run/secrets/database-ca.pem
+      AA_SANDBOX_ENABLED: 'false'
+    volumes: ['${DATABASE_CA_FILE:?Set path to database CA}:/run/secrets/database-ca.pem:ro']
+    restart: unless-stopped
+    read_only: true
+    tmpfs: ['/tmp']
+    cap_drop: [ALL]
+    security_opt: ['no-new-privileges:true']
+    healthcheck:
+      test:
+        [
+          CMD,
+          node,
+          -e,
+          "fetch('http://127.0.0.1:4001/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks: [application]
+  proxy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    environment:
+      WEB_DOMAIN: ${WEB_DOMAIN:?Set web domain}
+      API_DOMAIN: ${API_DOMAIN:?Set API domain}
+    ports: ['80:80', '443:443']
+    volumes:
+      ['./infra/Caddyfile:/etc/caddy/Caddyfile:ro', 'caddy-data:/data', 'caddy-config:/config']
+    depends_on:
+      web: { condition: service_healthy }
+      api: { condition: service_healthy }
+    networks: [application]
+networks:
+  application:
+volumes:
+  caddy-data:
+  caddy-config:

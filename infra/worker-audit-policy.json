@@ -1,0 +1,11 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": ["s3:PutObject", "s3:PutObjectRetention"],
+      "Resource": "arn:aws:s3:::REPLACE_AUDIT_BUCKET/audit/*"
+    },
+    { "Effect": "Allow", "Action": ["kms:GenerateDataKey"], "Resource": "REPLACE_KMS_KEY_ARN" }
+  ]
+}

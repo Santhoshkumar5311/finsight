@@ -10,8 +10,26 @@ const alice = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
 before(async () => {
   await db.exec('CREATE ROLE anon NOLOGIN; CREATE ROLE authenticated NOLOGIN;');
   const sql = await readFile(new URL('../../../database/001_schema.sql', import.meta.url), 'utf8');
+  const sql2 = await readFile(
+    new URL('../../../database/002_india_provider.sql', import.meta.url),
+    'utf8',
+  );
   await db.exec(sql);
   await db.exec(sql);
+  await db.exec(sql2);
+  await db.exec(sql2);
+  const sql3 = await readFile(
+    new URL('../../../database/003_runtime_security.sql', import.meta.url),
+    'utf8',
+  );
+  await db.exec(sql3);
+  await db.exec(sql3);
+  const sql4 = await readFile(
+    new URL('../../../database/004_statement_balances.sql', import.meta.url),
+    'utf8',
+  );
+  await db.exec(sql4);
+  await db.exec(sql4);
   await db.query('INSERT INTO profiles(user_id) VALUES($1),($2)', [alice, bob]);
   await db.query(
     "INSERT INTO accounts(id,user_id,name,type,mask,balance) VALUES('a',$1,'Alice checking','depository','1234',10000),('b',$2,'Bob checking','depository','5678',20000)",
@@ -99,10 +117,74 @@ test('agent budget writes cannot escape tenant scope', async () => {
       ),
   );
 });
+test('accounts/transactions default to the plaid provider and accept a statement-imported account', async () => {
+  await db.query(
+    "INSERT INTO accounts(id,user_id,name,type,mask,balance) VALUES('c',$1,'ICICI Sandbox','depository','1234',0)",
+    [alice],
+  );
+  const account = (await db.query('SELECT provider FROM accounts WHERE id=$1', ['a'])).rows[0];
+  assert.equal(account.provider, 'plaid');
+  await db.query("UPDATE accounts SET provider='icici-statement', item_id=NULL WHERE id='c'");
+  await db.query(
+    "INSERT INTO transactions(id,user_id,account_id,name,amount,date,category,provider,currency) VALUES('tc',$1,'c','UPI-swiggy',500,'2026-09-16','Dining','icici-statement','INR')",
+    [alice],
+  );
+  const tx = (
+    await db.query('SELECT provider,status,currency FROM transactions WHERE id=$1', ['tc'])
+  ).rows[0];
+  assert.equal(tx.provider, 'icici-statement');
+  assert.equal(tx.status, 'posted');
+  assert.equal(tx.currency, 'INR');
+});
+test('statement_imports is backend-only, like bank_items and audit_log', async () => {
+  await db.query(
+    "INSERT INTO statement_imports(user_id,account_id,provider,source_hash,row_count) VALUES($1,'a','icici-statement','deadbeef',3)",
+    [alice],
+  );
+  await asUser(
+    'authenticated',
+    alice,
+    async () =>
+      await assert.rejects(db.query('SELECT * FROM statement_imports'), /permission denied/),
+  );
+});
 test('unauthenticated users cannot read diary entries', async () => {
   await asUser(
     'anon',
     alice,
     async () => await assert.rejects(db.query('SELECT * FROM diary_entries'), /permission denied/),
+  );
+});
+
+test('API runtime has tenant isolation and cannot read Plaid credentials or delete audit records', async () => {
+  await asUser('finsight_api', alice, async () => {
+    assert.deepEqual(
+      (await db.query('SELECT id FROM accounts')).rows.map((r) => r.id),
+      ['a', 'c'],
+    );
+  });
+  await assert.rejects(
+    asUser('finsight_api', alice, () => db.query('SELECT encrypted_token FROM bank_items')),
+    /permission denied/,
+  );
+  await assert.rejects(
+    asUser('finsight_api', alice, () => db.query('DELETE FROM audit_log')),
+    /permission denied/,
+  );
+  await assert.rejects(
+    asUser('finsight_api', alice, () => db.query('SELECT * FROM webhook_inbox')),
+    /permission denied/,
+  );
+});
+test('worker can dispatch inbox and export audit but cannot alter existing audit events', async () => {
+  await asUser('finsight_worker', alice, async () => {
+    await db.query('SELECT encrypted_token FROM bank_items');
+    await db.query('SELECT * FROM webhook_inbox');
+    await db.query('SELECT * FROM audit_log');
+    assert.equal((await db.query('SELECT user_id FROM profiles')).rows.length, 2);
+  });
+  await assert.rejects(
+    asUser('finsight_worker', alice, () => db.query("UPDATE audit_log SET action='changed'")),
+    /permission denied/,
   );
 });

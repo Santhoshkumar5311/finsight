@@ -5,21 +5,53 @@ import helmet from 'helmet';
 import { rateLimit } from 'express-rate-limit';
 import multer from 'multer';
 import { createServer } from 'node:http';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import { Server } from 'socket.io';
 import { z } from 'zod';
 import { config, live } from './config.js';
 import { authenticate, tokenise, redact } from './security.js';
 import * as repo from './repository.js';
-import { summarize, categories, categorize, day, makeBudgets } from '@finsight/core';
+import {
+  summarize,
+  categories,
+  categorize,
+  day,
+  makeBudgets,
+  currenciesPresent,
+} from '@finsight/core';
 import { linkToken, exchange, verifyWebhook } from './plaid.js';
-import { initEvents, enqueue, updateDashboard } from './events.js';
+import { initEvents, enqueue, updateDashboard, eventsReady, closeEvents } from './events.js';
 import { chat, queryIndex } from './agent.js';
 import { diaryEntry, audioStream } from './audio.js';
 import { startReminders, pushReady } from './notifications.js';
 import { privateText } from './privacy.js';
 import { origins, allowedRequest, requestSecurity } from './request-security.js';
+import {
+  aaSandboxEnabled,
+  createConsent,
+  consentStatus,
+  importSandboxData,
+} from './providers/india-aa.js';
+import { parseIciciDocument } from './providers/document-import.js';
+import { parseIciciStatement, StatementImportError } from './providers/statement-import.js';
+import {
+  localAccountExists,
+  createLocalAccount,
+  loginLocal,
+  cookieToken,
+  revokeLocal,
+  sessionCookie,
+  changeLocalPassword,
+} from './local-auth.js';
+import {
+  initSessionCache,
+  revokeSession,
+  userRateLimit,
+  securityReady,
+  closeSessionCache,
+} from './session-cache.js';
 await repo.initStore();
+await initSessionCache();
 const app = express(),
   http = createServer(app);
 app.disable('x-powered-by');
@@ -31,8 +63,14 @@ app.use(
   rateLimit({ windowMs: 60000, limit: 180, standardHeaders: 'draft-8', legacyHeaders: false }),
 );
 app.get('/health', (_, res) => res.json({ status: 'ok', mode: config.mode }));
-app.get('/config', (_, res) =>
-  res.json({ mode: config.mode, pushReady, vapidPublicKey: process.env.VAPID_PUBLIC_KEY || null }),
+app.get('/config', async (_, res) =>
+  res.json({
+    mode: config.mode,
+    authProvider: live ? 'supabase' : 'local',
+    setupRequired: !live && !(await localAccountExists()),
+    pushReady,
+    vapidPublicKey: process.env.VAPID_PUBLIC_KEY || null,
+  }),
 );
 app.post(
   '/webhooks/plaid',
@@ -50,9 +88,40 @@ app.post(
   },
 );
 app.use(express.json({ limit: '64kb' }));
+const authLimit = rateLimit({
+  windowMs: 15 * 60000,
+  limit: 20,
+  standardHeaders: 'draft-8',
+  legacyHeaders: false,
+  message: { error: 'Too many attempts. Please try again in 15 minutes.' },
+});
+app.post('/auth/:action', authLimit, async (req, res) => {
+  if (live || !['register', 'login'].includes(req.params.action)) return res.sendStatus(404);
+  // JSON + explicit browser Origin checks avoid cross-site form login/registration.
+  if (!req.is('application/json')) return res.status(415).json({ error: 'JSON required' });
+  const session = await (req.params.action === 'register'
+    ? createLocalAccount(req.body)
+    : loginLocal(req.body));
+  sessionCookie(res, session);
+  await repo.audit('00000000-0000-4000-8000-000000000001', 'auth.' + req.params.action);
+  res.status(req.params.action === 'register' ? 201 : 200).json({ authenticated: true });
+});
 app.use('/api', async (req, res, next) => {
   try {
-    req.user = await authenticate(req.get('authorization')?.replace(/^Bearer /, ''));
+    req.user = await authenticate(
+      req.get('authorization')?.replace(/^Bearer /, ''),
+      cookieToken(req.headers.cookie),
+      req.path !== '/session',
+    );
+    if (
+      !(await userRateLimit(
+        req.user.id,
+        req.path === '/chat' ? 'chat' : 'api',
+        req.path === '/chat' ? 20 : 180,
+        60,
+      ))
+    )
+      return res.status(429).json({ error: 'Too many requests. Try again shortly.' });
     await repo.audit(req.user.id, 'api.' + req.method, req.path);
     next();
   } catch (e) {
@@ -66,7 +135,11 @@ const io = new Server(http, {
 });
 io.use(async (socket, next) => {
   try {
-    socket.data.user = await authenticate(socket.handshake.auth.token);
+    socket.data.user = await authenticate(
+      socket.handshake.auth.token,
+      cookieToken(socket.request.headers.cookie),
+      false,
+    );
     next();
   } catch {
     next(new Error('Authentication required'));
@@ -74,16 +147,58 @@ io.use(async (socket, next) => {
 });
 io.on('connection', (socket) => {
   socket.join(socket.data.user.id);
-  if (live) {
-    const timeout = setTimeout(
-      () => socket.disconnect(true),
-      Math.max(0, socket.data.user.expiresAt - Date.now()),
-    );
-    socket.on('disconnect', () => clearTimeout(timeout));
-  }
+  socket.join('session:' + socket.data.user.sessionId);
+  const timeout = setTimeout(
+    () => socket.disconnect(true),
+    Math.max(0, socket.data.user.expiresAt - Date.now()),
+  );
+  const check = setInterval(async () => {
+    try {
+      await authenticate(
+        socket.handshake.auth.token,
+        cookieToken(socket.request.headers.cookie),
+        false,
+      );
+    } catch {
+      socket.disconnect(true);
+    }
+  }, 30000);
+  socket.on('disconnect', () => {
+    clearTimeout(timeout);
+    clearInterval(check);
+  });
 });
 await initEvents(io);
-startReminders();
+const stopReminders = !live ? startReminders() : undefined;
+app.get('/api/session', (req, res) =>
+  res.json({ user: { id: req.user.id, aal: req.user.aal }, expiresAt: req.user.expiresAt }),
+);
+app.post('/api/session/logout', async (req, res) => {
+  if (live) await revokeSession(req.user.sessionId);
+  else {
+    revokeLocal(cookieToken(req.headers.cookie));
+    sessionCookie(res);
+  }
+  io.in('session:' + req.user.sessionId).disconnectSockets(true);
+  res.json({ signedOut: true });
+});
+app.post('/api/session/password', authLimit, async (req, res) => {
+  if (live) return res.sendStatus(404);
+  const session = await changeLocalPassword(req.body);
+  sessionCookie(res, session);
+  io.in(req.user.id).disconnectSockets(true);
+  await repo.audit(req.user.id, 'auth.password.changed');
+  res.json({ changed: true });
+});
+app.get('/ready', async (_, res) => {
+  try {
+    if (live) await repo.pool.query('SELECT 1');
+    if (!(await securityReady()) || !eventsReady()) throw new Error('Not ready');
+    res.json({ status: 'ready' });
+  } catch {
+    res.status(503).json({ status: 'unavailable' });
+  }
+});
 app.get('/api/dashboard', async (req, res) => {
   const options = z
     .object({
@@ -92,10 +207,17 @@ app.get('/api/dashboard', async (req, res) => {
         .regex(/^\d{4}-(0[1-9]|1[0-2])$/)
         .optional(),
       period: z.enum(['month', 'week']).optional(),
+      currency: z
+        .string()
+        .regex(/^[A-Z]{3}$/)
+        .optional(),
     })
     .parse(req.query);
   const s = await repo.state(req.user.id);
-  res.json({ ...s, summary: summarize(s, options), mode: config.mode });
+  const currencies = currenciesPresent(s);
+  if (options.currency && !currencies.includes(options.currency))
+    return res.status(400).json({ error: `No accounts or transactions use ${options.currency}` });
+  res.json({ ...s, summary: summarize(s, options), currencies, mode: config.mode });
 });
 app.post('/api/plaid/link-token', async (req, res) => {
   if (!live)
@@ -117,13 +239,119 @@ app.post('/api/plaid/exchange', async (req, res) => {
 });
 app.get('/api/plaid/status', async (req, res) => {
   if (!live) return res.json({ items: [], complete: true });
-  const result = await repo.pool.query(
-    'SELECT import_status AS status FROM bank_items WHERE user_id=$1',
-    [req.user.id],
+  const result = await repo.scoped(req.user.id, (c) =>
+    c.query('SELECT import_status AS status FROM bank_items WHERE user_id=$1', [req.user.id]),
   );
   res.json({
     items: result.rows,
     complete: result.rows.length > 0 && result.rows.every((x) => x.status === 'complete'),
+  });
+});
+// India: no live Account Aggregator/TSP integration exists yet (see docs/INDIA_BANKING.md).
+// The sandbox routes below simulate the AA consent/fetch shape with obviously fake data,
+// gated by AA_SANDBOX_ENABLED, and are never reachable in a production config (config.js
+// refuses to start with AA_SANDBOX_ENABLED=true when NODE_ENV=production).
+app.get('/api/india/status', (req, res) =>
+  res.json({ sandboxEnabled: live && aaSandboxEnabled() }),
+);
+app.post('/api/india/consent', (req, res) => {
+  if (!live) return res.status(404).json({ error: 'Not available in demo' });
+  res.status(201).json(createConsent(req.user.id));
+});
+app.get('/api/india/consent/:id/status', (req, res) => {
+  if (!live) return res.status(404).json({ error: 'Not available in demo' });
+  res.json(consentStatus(req.user.id, z.uuid().parse(req.params.id)));
+});
+app.post('/api/india/import-sandbox', async (req, res) => {
+  if (!live) return res.status(404).json({ error: 'Not available in demo' });
+  const { consentId } = z.object({ consentId: z.uuid() }).strict().parse(req.body);
+  const result = await importSandboxData(req.user.id, consentId);
+  await updateDashboard(req.user.id);
+  res.status(202).json(result);
+});
+const csvUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024, files: 1, fields: 2 },
+  fileFilter: (_req, file, cb) =>
+    cb(
+      null,
+      [
+        'text/csv',
+        'application/vnd.ms-excel',
+        'application/pdf',
+        'application/octet-stream',
+        'text/plain',
+      ].includes(file.mimetype),
+    ),
+});
+// Works in demo and live mode alike: no external credentials or approvals are needed to
+// import a statement you already downloaded yourself from ICICI's NetBanking portal.
+app.post('/api/accounts/import/icici', csvUpload.single('statement'), async (req, res) => {
+  if (!req.file)
+    return res
+      .status(400)
+      .json({ error: 'Attach an ICICI CSV, XLS transaction history, or credit-card PDF' });
+  const body = z
+    .object({
+      accountName: z.string().min(1).max(60).optional(),
+      last4: z
+        .string()
+        .regex(/^\d{4}$/)
+        .optional(),
+    })
+    .parse(req.body || {});
+  let accountId = tokenise('icici-statement:' + req.user.id);
+  let parsed;
+  try {
+    const binary =
+      req.file.buffer.subarray(0, 5).toString() === '%PDF-' ||
+      req.file.buffer.subarray(0, 8).toString('hex') === 'd0cf11e0a1b11ae1';
+    parsed = binary
+      ? await parseIciciDocument(req.file.buffer, req.user.id)
+      : parseIciciStatement(req.file.buffer.toString('utf8'), accountId);
+    accountId = parsed.accountId || accountId;
+  } catch (e) {
+    if (e instanceof StatementImportError) return res.status(400).json({ error: e.message });
+    throw e;
+  }
+  const existing = await repo.getAccount(req.user.id, accountId);
+  const accountMeta = {
+    provider: 'icici-statement',
+    accountId,
+    institution: 'ICICI Bank',
+    accountName:
+      body.accountName ||
+      existing?.name ||
+      (parsed.accountType === 'credit' ? 'ICICI credit card' : 'ICICI savings account'),
+    accountType: parsed.accountType || 'depository',
+    accountSubtype: parsed.accountType === 'credit' ? 'credit-card' : 'savings',
+    balanceDate:
+      parsed.balanceDate ||
+      parsed.transactions
+        .map((t) => t.date)
+        .sort()
+        .at(-1),
+    maskedNumber: parsed.last4
+      ? '••' + parsed.last4
+      : body.last4
+        ? '••' + body.last4
+        : existing?.mask || '••••',
+    currency: 'INR',
+    currentBalance:
+      parsed.closingBalance ?? (existing?.balance != null ? Number(existing.balance) : 0),
+  };
+  await repo.importTransactions(req.user.id, accountMeta, parsed.transactions, {
+    sourceHash: createHash('sha256').update(req.file.buffer).digest('hex'),
+    skipped: parsed.skipped,
+  });
+  await updateDashboard(req.user.id);
+  res.status(202).json({
+    imported: parsed.rowCount,
+    reconciled: !!parsed.reconciled,
+    balanceAsOf: parsed.balanceDate,
+    skipped: parsed.skipped,
+    warnings: parsed.warnings.slice(0, 20),
+    accountId,
   });
 });
 app.post('/api/chat', rateLimit({ windowMs: 60000, limit: 20 }), async (req, res) => {
@@ -283,3 +511,23 @@ app.use((err, req, res, next) => {
 http.listen(config.port, live ? '0.0.0.0' : '127.0.0.1', () =>
   console.log(`FinSight API · ${config.mode} · http://localhost:${config.port}`),
 );
+
+let shuttingDown = false;
+for (const signal of ['SIGTERM', 'SIGINT'])
+  process.on(signal, async () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    const force = setTimeout(() => process.exit(1), 10000);
+    force.unref();
+    stopReminders?.();
+    http.close();
+    io.disconnectSockets(true);
+    try {
+      await closeEvents();
+      await closeSessionCache();
+      await repo.pool?.end();
+      process.exit(0);
+    } catch {
+      process.exit(1);
+    }
+  });

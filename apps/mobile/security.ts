@@ -62,6 +62,7 @@ export async function api(path: string, options: RequestInit = {}) {
   const t = await sessionToken();
   const r = await fetch(API + path, {
     ...options,
+    credentials: 'include',
     headers: {
       ...(options.body instanceof FormData ? {} : { 'Content-Type': 'application/json' }),
       Authorization: 'Bearer ' + t,

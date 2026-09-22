@@ -41,3 +41,10 @@ test('production refuses unencrypted cache or queue transport', () => {
   assert.notEqual(r.status, 0);
   assert.match(r.stderr, /must use TLS/);
 });
+test('production refuses the India Account Aggregator sandbox mock', () => {
+  const r = start({ NODE_ENV: 'production', AA_SANDBOX_ENABLED: 'true' });
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /AA_SANDBOX_ENABLED/);
+});
+test('the AA sandbox flag is fine outside production', () =>
+  assert.equal(start({ AA_SANDBOX_ENABLED: 'true' }).status, 0));

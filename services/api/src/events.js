@@ -6,7 +6,13 @@ import { pool, state, saveMetrics, saveBudgets, audit } from './repository.js';
 import { syncItem } from './plaid.js';
 import { summarize, makeBudgets } from '@finsight/core';
 import { checksum } from './security.js';
-let io, channel, redis, broker, dispatcher;
+let io,
+  channel,
+  redis,
+  sub,
+  broker,
+  dispatcher,
+  closing = false;
 const queue = 'finsight.bank.sync';
 export async function updateDashboard(user) {
   const s = await state(user);
@@ -30,11 +36,11 @@ export async function enqueue(itemId, id) {
     await channel.waitForConfirms();
   }
 }
-export async function initEvents(server) {
+export async function initEvents(server, { consume = false } = {}) {
   io = server;
   if (!live) return;
   redis = createClient({ url: process.env.REDIS_URL });
-  const sub = redis.duplicate();
+  sub = redis.duplicate();
   for (const r of [redis, sub]) r.on('error', () => console.error('Redis connection error'));
   await Promise.all([redis.connect(), sub.connect()]);
   io.adapter(createAdapter(redis, sub));
@@ -42,14 +48,17 @@ export async function initEvents(server) {
   channel = await broker.createConfirmChannel();
   broker.on('error', () => console.error('RabbitMQ connection error'));
   broker.on('close', () => {
-    console.error('RabbitMQ disconnected; restart required');
-    process.exitCode = 1;
+    if (!closing) {
+      console.error('RabbitMQ disconnected; supervisor restart required');
+      process.exit(1);
+    }
   });
   await channel.assertQueue(queue, {
     durable: true,
     arguments: { 'x-dead-letter-exchange': '', 'x-dead-letter-routing-key': queue + '.dead' },
   });
   await channel.assertQueue(queue + '.dead', { durable: true });
+  if (!consume) return;
   await channel.prefetch(8);
   await channel.consume(queue, async (msg) => {
     if (!msg) return;
@@ -93,4 +102,16 @@ export async function initEvents(server) {
     }
   }, 15000);
   dispatcher.unref();
+}
+
+export function eventsReady() {
+  return !live || (!!redis?.isReady && !!sub?.isReady && !!channel && !closing);
+}
+export async function closeEvents() {
+  closing = true;
+  clearInterval(dispatcher);
+  await channel?.close();
+  await broker?.close();
+  if (sub?.isOpen) await sub.quit();
+  if (redis?.isOpen) await redis.quit();
 }

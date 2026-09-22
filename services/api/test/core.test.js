@@ -7,6 +7,9 @@ import {
   recurringBills,
   anomalies,
   makeBudgets,
+  money,
+  currenciesPresent,
+  primaryCurrency,
 } from '../../../packages/core/src/index.js';
 const tx = (overrides = {}) => ({
   id: '1',
@@ -125,6 +128,42 @@ test('sample payroll is an inflow and produces a positive surplus', async () => 
   assert.ok(summarize(s).income > 0);
 });
 
+test('money formats INR with the Indian locale and USD with the US locale', () => {
+  assert.equal(money(150000, 'INR'), '₹1,500.00');
+  assert.equal(money(150000, 'USD'), '$1,500.00');
+  assert.equal(money(150000), '$1,500.00');
+});
+test('currenciesPresent and primaryCurrency read from accounts and transactions', () => {
+  const s = state([tx({ currency: 'INR' })], [{ type: 'depository', balance: 0, currency: 'INR' }]);
+  assert.deepEqual(currenciesPresent(s), ['INR']);
+  assert.equal(primaryCurrency(s), 'INR');
+  assert.equal(primaryCurrency(state([], [])), 'USD');
+});
+test('summarize never blends two currencies into one total', () => {
+  const s = state(
+    [
+      tx({ id: 'usd', amount: 1000, currency: 'USD' }),
+      tx({ id: 'inr', amount: 500000, currency: 'INR' }),
+    ],
+    [
+      { type: 'depository', balance: 100000, currency: 'USD' },
+      { type: 'depository', balance: 2000000, currency: 'INR' },
+    ],
+  );
+  const usd = summarize(s, { month: '2026-09', currency: 'USD' });
+  const inr = summarize(s, { month: '2026-09', currency: 'INR' });
+  assert.equal(usd.expenses, 1000);
+  assert.equal(inr.expenses, 500000);
+  assert.equal(usd.currency, 'USD');
+  assert.equal(inr.currency, 'INR');
+  // Defaulting with no currency option picks the first currency present, not a blend of both.
+  assert.equal(summarize(s, { month: '2026-09' }).expenses, 1000);
+});
+test('categories recognize common Indian merchant/UPI narrations', () => {
+  assert.equal(categorize('UPI-SWIGGY-500123456789-swiggy@icici'), 'Dining');
+  assert.equal(categorize('BIGBASKET ONLINE'), 'Groceries');
+  assert.equal(categorize('ELECTRICITY BOARD PAYMENT'), 'Utilities');
+});
 test('next-month forecast uses historical income and accounts for known bills', async () => {
   const { forecastNextMonth } = await import('../../../packages/core/src/index.js');
   const s = state(
@@ -140,4 +179,53 @@ test('next-month forecast uses historical income and accounts for known bills', 
   assert.equal(f.income, 500000);
   assert.equal(f.expenses, 170000);
   assert.equal(f.profit, 280000);
+});
+
+test('card refunds reduce expenses and card repayments are excluded from income', () => {
+  const state = {
+    accounts: [{ id: 'card', type: 'credit', currency: 'INR', balance: 8000 }],
+    transactions: [
+      {
+        id: 'purchase',
+        name: 'Store',
+        accountId: 'card',
+        date: '2026-09-10',
+        amount: 10000,
+        category: 'Shopping',
+        currency: 'INR',
+      },
+      {
+        id: 'refund',
+        name: 'Store refund',
+        accountId: 'card',
+        date: '2026-09-11',
+        amount: -2000,
+        category: 'Shopping',
+        currency: 'INR',
+      },
+      {
+        id: 'payment',
+        name: 'Payment received',
+        accountId: 'card',
+        date: '2026-09-12',
+        amount: -5000,
+        category: 'Other',
+        transfer: true,
+        currency: 'INR',
+      },
+    ],
+    bills: [],
+    budgets: [],
+  };
+  const summary = summarize(state, { month: '2026-09', currency: 'INR' });
+  assert.equal(summary.income, 0);
+  assert.equal(summary.expenses, 8000);
+  assert.equal(summary.spending[0].amount, 8000);
+});
+
+test('recurring card repayments are excluded from bill detection', () => {
+  const transfers = ['2026-07-10', '2026-08-10', '2026-09-10'].map((date, i) =>
+    tx({ id: String(i), name: 'CC BillPay', date, amount: 50000, transfer: true }),
+  );
+  assert.deepEqual(recurringBills(transfers, new Date('2026-09-22')), []);
 });

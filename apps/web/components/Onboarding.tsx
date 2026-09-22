@@ -2,7 +2,7 @@
 import { useDialog } from '@/lib/useDialog';
 import { useEffect, useState } from 'react';
 import { usePlaidLink } from 'react-plaid-link';
-import { X, ShieldCheck, Landmark, Check, ArrowRight, LoaderCircle } from 'lucide-react';
+import { X, ShieldCheck, Landmark, Check, ArrowRight, LoaderCircle, Upload } from 'lucide-react';
 import { api, supabase } from '@/lib/api';
 function Link({
   token,
@@ -33,6 +33,93 @@ function Link({
     </button>
   );
 }
+// There is no live Account Aggregator connection configured (see docs/INDIA_BANKING.md):
+// FinSight has no TSP/FIU registration or ICICI approval. This offers only what actually
+// works today: a fixture-data sandbox (when explicitly enabled) and statement import.
+function IndiaConnect({
+  onImported,
+  onError,
+}: {
+  onImported: (summary: string) => void;
+  onError: (e: string) => void;
+}) {
+  const [sandboxEnabled, setSandboxEnabled] = useState<boolean | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [file, setFile] = useState<File | null>(null);
+  useEffect(() => {
+    api('/api/india/status')
+      .then((s) => setSandboxEnabled(!!s.sandboxEnabled))
+      .catch(() => setSandboxEnabled(false));
+  }, []);
+  async function trySandbox() {
+    setBusy(true);
+    try {
+      const consent = await api('/api/india/consent', { method: 'POST' });
+      const result = await api('/api/india/import-sandbox', {
+        method: 'POST',
+        body: JSON.stringify({ consentId: consent.consentId }),
+      });
+      onImported(`${result.imported} sandbox transaction(s) imported.`);
+    } catch (e) {
+      onError((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function upload() {
+    if (!file) return;
+    setBusy(true);
+    try {
+      const body = new FormData();
+      body.append('statement', file);
+      const result = await api('/api/accounts/import/icici', { method: 'POST', body });
+      onImported(
+        `${result.imported} transaction(s) imported` +
+          (result.skipped ? `, ${result.skipped} row(s) skipped` : '') +
+          '.',
+      );
+    } catch (e) {
+      onError((e as Error).message);
+    } finally {
+      setBusy(false);
+      setFile(null);
+    }
+  }
+  return (
+    <>
+      <div className="notice">
+        {sandboxEnabled
+          ? 'A local Account Aggregator sandbox is enabled for testing the connection flow with fixture data — this is not a real bank connection.'
+          : 'A live ICICI connection needs a licensed Account Aggregator/TSP integration that isn’t configured here. That connection is unavailable/development-only right now.'}
+      </div>
+      {sandboxEnabled && (
+        <button className="button full" onClick={trySandbox} disabled={busy}>
+          {busy ? (
+            <LoaderCircle size={16} className="spin" />
+          ) : (
+            'Try sandbox connection (fixture data)'
+          )}
+        </button>
+      )}
+      <label className="button full" style={{ cursor: 'pointer' }}>
+        <Upload size={15} /> {file ? file.name : 'Choose ICICI PDF, XLS or CSV'}
+        <input
+          type="file"
+          accept=".csv,.xls,.pdf,text/csv,application/vnd.ms-excel,application/pdf"
+          hidden
+          onChange={(e) => setFile(e.target.files?.[0] || null)}
+        />
+      </label>
+      <button className="button primary full" onClick={upload} disabled={busy || !file}>
+        {busy ? <LoaderCircle size={16} className="spin" /> : 'Import statement'}
+      </button>
+      <span className="muted small">
+        Upload an ICICI transaction-history XLS/CSV or a credit-card statement PDF. No NetBanking
+        password, MPIN, PIN, CVV or OTP is ever requested by FinSight.
+      </span>
+    </>
+  );
+}
 export default function Onboarding({
   mode,
   onClose,
@@ -45,6 +132,8 @@ export default function Onboarding({
   useDialog();
   const [token, setToken] = useState(''),
     [step, setStep] = useState(0),
+    [country, setCountry] = useState<'US' | 'IN' | ''>(''),
+    [readyNotice, setReadyNotice] = useState(''),
     [error, setError] = useState(''),
     [factor, setFactor] = useState(''),
     [qr, setQr] = useState(''),
@@ -66,6 +155,7 @@ export default function Onboarding({
     return () => clearInterval(timer);
   }, [step, onComplete]);
   async function connect() {
+    setCountry('US');
     setBusy(true);
     setError('');
     try {
@@ -105,7 +195,6 @@ export default function Onboarding({
     else {
       setFactor('');
       setQr('');
-      void connect();
     }
   }
   return (
@@ -139,13 +228,38 @@ export default function Onboarding({
         </div>
         {mode === 'demo' ? (
           <>
-            <div className="notice">
-              You’re exploring a demo with sample accounts. Real bank connection requires Supabase,
-              Plaid and the backend services configured in the project’s .env file.
-            </div>
-            <button className="button primary full" onClick={onClose}>
-              Explore demo accounts <ArrowRight size={17} />
-            </button>
+            {country !== 'IN' && (
+              <>
+                <div className="notice">
+                  You’re using a private local workspace. A real Plaid connection needs Supabase,
+                  Plaid and backend services configured in the project’s .env file — but ICICI
+                  statement import works right here, without any of that.
+                </div>
+                <button className="button primary full" onClick={onClose}>
+                  Continue to accounts <ArrowRight size={17} />
+                </button>
+                <button className="button full" onClick={() => setCountry('IN')}>
+                  India · ICICI Bank <ArrowRight size={17} />
+                </button>
+              </>
+            )}
+            {country === 'IN' && !readyNotice && (
+              <IndiaConnect
+                onImported={(summary) => {
+                  setReadyNotice(summary);
+                  onComplete();
+                }}
+                onError={setError}
+              />
+            )}
+            {country === 'IN' && readyNotice && (
+              <>
+                <div className="notice">{readyNotice}</div>
+                <button className="button primary full" onClick={onClose}>
+                  Go to my dashboard <ArrowRight size={17} />
+                </button>
+              </>
+            )}
           </>
         ) : (
           <>
@@ -184,19 +298,42 @@ export default function Onboarding({
                     </button>
                   </div>
                 )}
+                <span className="muted small">Connect a bank</span>
                 <button className="button primary full" onClick={connect} disabled={busy}>
-                  {busy ? (
+                  {busy && country === 'US' ? (
                     <LoaderCircle size={16} className="spin" />
                   ) : (
-                    'Continue to bank connection'
+                    <>
+                      United States · Plaid <ArrowRight size={17} />
+                    </>
                   )}
+                </button>
+                <button
+                  className="button full"
+                  onClick={() => {
+                    setCountry('IN');
+                    setStep(1);
+                  }}
+                  disabled={busy}
+                >
+                  India · ICICI Bank <ArrowRight size={17} />
                 </button>
               </>
             )}
-            {step === 1 && token && (
+            {step === 1 && country === 'US' && token && (
               <Link token={token} onSuccess={() => setStep(2)} onError={setError} />
             )}{' '}
-            {step === 2 && (
+            {step === 1 && country === 'IN' && (
+              <IndiaConnect
+                onImported={(summary) => {
+                  setReadyNotice(summary);
+                  setStep(3);
+                  onComplete();
+                }}
+                onError={setError}
+              />
+            )}
+            {step === 2 && country === 'US' && (
               <div className="import-progress">
                 <div className="progress-track">
                   <div />
@@ -211,7 +348,8 @@ export default function Onboarding({
             {step === 3 && (
               <>
                 <div className="notice">
-                  Your accounts are connected. Choose bill reminder lead times in Settings.
+                  {readyNotice ||
+                    'Your accounts are connected. Choose bill reminder lead times in Settings.'}
                 </div>
                 <button className="button primary full" onClick={onClose}>
                   Go to my dashboard <ArrowRight size={17} />

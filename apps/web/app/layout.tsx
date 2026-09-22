@@ -1,5 +1,6 @@
 import type { Metadata } from 'next';
 import './globals.css';
+import AuthBoundary from '@/components/AuthBoundary';
 import { connection } from 'next/server';
 export const metadata: Metadata = {
   title: 'FinSight — A little clarity. A better tomorrow.',
@@ -9,7 +10,9 @@ export default async function RootLayout({ children }: { children: React.ReactNo
   await connection();
   return (
     <html lang="en">
-      <body>{children}</body>
+      <body>
+        <AuthBoundary>{children}</AuthBoundary>
+      </body>
     </html>
   );
 }

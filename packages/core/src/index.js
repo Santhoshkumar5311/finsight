@@ -21,17 +21,35 @@ export const colors = [
   '#dddcd4',
 ];
 export const day = (date = new Date()) => new Date(date).toISOString().slice(0, 10);
-export const money = (cents) =>
-  new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(cents / 100);
+const currencyLocales = { USD: 'en-US', INR: 'en-IN' };
+export const money = (cents, currency = 'USD') =>
+  new Intl.NumberFormat(currencyLocales[currency], { style: 'currency', currency }).format(
+    cents / 100,
+  );
+// Accounts/transactions carry their own currency; this never converts between them.
+export function currenciesPresent(state) {
+  return [
+    ...new Set(
+      [...(state.accounts || []), ...(state.transactions || [])]
+        .map((x) => x.currency)
+        .filter(Boolean),
+    ),
+  ];
+}
+export function primaryCurrency(state) {
+  return currenciesPresent(state)[0] || 'USD';
+}
 const patterns = {
-  Groceries: /grocery|groceries|whole foods|trader joe|safeway|market/i,
-  Dining: /restaurant|coffee|cafe|starbucks|chipotle|dining|doordash/i,
-  Utilities: /electric|water|internet|utility|utilities|comcast|rent/i,
-  Transport: /uber|lyft|gas|fuel|transit|transport/i,
-  Shopping: /amazon|target|shop|clothing|nike/i,
-  Health: /pharmacy|health|medical|cvs|fitness|gym/i,
-  Entertainment: /cinema|movie|concert|entertainment/i,
-  Subscriptions: /netflix|spotify|apple.com|adobe|subscription|icloud/i,
+  Groceries:
+    /grocery|groceries|whole foods|trader joe|safeway|market|bigbasket|dmart|zepto|blinkit/i,
+  Dining: /restaurant|coffee|cafe|starbucks|chipotle|dining|doordash|zomato|swiggy/i,
+  Utilities:
+    /electric|water|internet|utility|utilities|comcast|rent|airtel|jio\b|vodafone|tatapower|bses|electricity board/i,
+  Transport: /uber|lyft|gas|fuel|transit|transport|\bola\b|rapido|irctc|metro/i,
+  Shopping: /amazon|target|shop|clothing|nike|flipkart|myntra|ajio/i,
+  Health: /pharmacy|health|medical|cvs|fitness|gym|apollo|practo/i,
+  Entertainment: /cinema|movie|concert|entertainment|bookmyshow|pvr|inox/i,
+  Subscriptions: /netflix|spotify|apple.com|adobe|subscription|icloud|hotstar|prime video/i,
 };
 export function categorize(name, primary = '') {
   return Object.entries(patterns).find(([, re]) => re.test(name + ' ' + primary))?.[0] || 'Other';
@@ -61,7 +79,7 @@ export function salaries(transactions) {
 }
 export function recurringBills(transactions, now = new Date()) {
   const groups = new Map();
-  for (const t of transactions.filter((t) => t.amount > 0 && !t.pending)) {
+  for (const t of transactions.filter((t) => t.amount > 0 && !t.pending && !isTransfer(t))) {
     const key = t.name.toLowerCase().replace(/\d+/g, '').trim();
     groups.set(key, [...(groups.get(key) || []), t]);
   }
@@ -131,10 +149,19 @@ export function anomalies(transactions) {
   }
   return alerts;
 }
-export function makeBudgets(transactions, now = new Date()) {
+export function makeBudgets(
+  transactions,
+  now = new Date(),
+  currency = transactions.find((t) => t.currency)?.currency || 'USD',
+) {
   const cutoff = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
   const previous = transactions.filter(
-    (t) => new Date(t.date) < cutoff && t.amount > 0 && !t.pending && !isTransfer(t),
+    (t) =>
+      (t.currency || 'USD') === currency &&
+      new Date(t.date) < cutoff &&
+      t.amount > 0 &&
+      !t.pending &&
+      !isTransfer(t),
   );
   const months = new Set(previous.map((t) => t.date.slice(0, 7))).size || 1;
   return categories.map((category) => ({
@@ -150,21 +177,34 @@ export function makeBudgets(transactions, now = new Date()) {
 }
 export function summarize(
   state,
-  { month = day().slice(0, 7), period = 'month', now = new Date() } = {},
+  {
+    month = day().slice(0, 7),
+    period = 'month',
+    now = new Date(),
+    currency = primaryCurrency(state),
+  } = {},
 ) {
   const end = day(now),
     start = day(new Date(now.getTime() - 6 * 864e5));
-  const tx = state.transactions.filter(
+  // Scoping every aggregate to one currency first means USD and INR (or any other pair) are never summed together.
+  const currencyTransactions = state.transactions.filter((t) => (t.currency || 'USD') === currency);
+  const tx = currencyTransactions.filter(
     (t) =>
       !t.pending &&
       !isTransfer(t) &&
       (period === 'week' ? t.date >= start && t.date <= end : t.date.startsWith(month)),
   );
-  // All values are integer cents. A credit balance is a liability; negative deposit balances are overdrafts.
-  const income = tx.filter((t) => t.amount < 0).reduce((s, t) => s - t.amount, 0),
-    expenses = tx.filter((t) => t.amount > 0).reduce((s, t) => s + t.amount, 0);
+  // All values are integer minor units (cents/paise). A credit balance is a liability; negative deposit balances are overdrafts.
+  const creditAccounts = new Set(
+    state.accounts.filter((a) => a.type === 'credit' && a.id).map((a) => a.id),
+  );
+  const expense = (t) => t.amount > 0 || creditAccounts.has(t.accountId);
+  const income = tx
+      .filter((t) => t.amount < 0 && !creditAccounts.has(t.accountId))
+      .reduce((s, t) => s - t.amount, 0),
+    expenses = tx.filter(expense).reduce((s, t) => s + t.amount, 0);
   const debt = state.accounts
-    .filter((a) => a.currency === 'USD')
+    .filter((a) => (a.currency || 'USD') === currency)
     .reduce(
       (s, a) => s + (a.type === 'credit' ? Math.max(0, a.balance) : Math.max(0, -a.balance)),
       0,
@@ -173,19 +213,17 @@ export function summarize(
     .map((name, i) => ({
       name,
       color: colors[i],
-      amount: tx
-        .filter((t) => t.category === name && t.amount > 0)
-        .reduce((s, t) => s + t.amount, 0),
+      amount: tx.filter((t) => t.category === name && expense(t)).reduce((s, t) => s + t.amount, 0),
     }))
     .filter((x) => x.amount > 0);
   const bills = [
     ...state.bills,
-    ...recurringBills(state.transactions, now).filter(
+    ...recurringBills(currencyTransactions, now).filter(
       (b) => !state.bills.some((x) => x.name === b.name),
     ),
   ]
     .map((b) => {
-      const paid = state.transactions.some(
+      const paid = currencyTransactions.some(
         (t) =>
           t.name.toLowerCase() === b.name.toLowerCase() &&
           !t.pending &&
@@ -197,6 +235,7 @@ export function summarize(
     })
     .sort((a, b) => a.due.localeCompare(b.due));
   return {
+    currency,
     income,
     expenses,
     debt,
@@ -204,10 +243,10 @@ export function summarize(
     spending,
     bills,
     salary:
-      salaries(state.transactions)
+      salaries(currencyTransactions)
         .filter((t) => tx.some((x) => x.id === t.id))
         .at(-1) || null,
-    alerts: anomalies(state.transactions),
+    alerts: anomalies(currencyTransactions),
     savingsRate: income ? Math.round(((income - expenses) / income) * 100) : 0,
     updatedAt: new Date().toISOString(),
     month,
@@ -222,10 +261,12 @@ export function diaryTags(text) {
   if (/grateful|happy|proud/i.test(text)) tags.push('small wins');
   return tags.length ? tags : ['daily reflection'];
 }
-export function forecastNextMonth(state, now = new Date()) {
+export function forecastNextMonth(state, now = new Date(), currency = primaryCurrency(state)) {
   const current = day(now).slice(0, 7),
     next = day(new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1))).slice(0, 7);
-  const posted = state.transactions.filter((t) => !t.pending && !isTransfer(t));
+  const posted = state.transactions.filter(
+    (t) => (t.currency || 'USD') === currency && !t.pending && !isTransfer(t),
+  );
   const months = [
     ...new Set(posted.filter((t) => t.date.slice(0, 7) < current).map((t) => t.date.slice(0, 7))),
   ]
@@ -234,26 +275,33 @@ export function forecastNextMonth(state, now = new Date()) {
   if (!months.length) return null;
   const history = posted.filter((t) => months.includes(t.date.slice(0, 7))),
     fixedCategories = ['Utilities', 'Subscriptions'];
+  const creditAccounts = new Set(
+    state.accounts.filter((a) => a.type === 'credit' && a.id).map((a) => a.id),
+  );
+  const expense = (t) => t.amount > 0 || creditAccounts.has(t.accountId);
   const income = Math.round(
-    history.filter((t) => t.amount < 0).reduce((s, t) => s - t.amount, 0) / months.length,
+    history
+      .filter((t) => t.amount < 0 && !creditAccounts.has(t.accountId))
+      .reduce((s, t) => s - t.amount, 0) / months.length,
   );
   const fixed = Math.round(
     history
-      .filter((t) => t.amount > 0 && fixedCategories.includes(t.category))
+      .filter((t) => expense(t) && fixedCategories.includes(t.category))
       .reduce((s, t) => s + t.amount, 0) / months.length,
   );
   const variable = Math.round(
     history
-      .filter((t) => t.amount > 0 && !fixedCategories.includes(t.category))
+      .filter((t) => expense(t) && !fixedCategories.includes(t.category))
       .reduce((s, t) => s + t.amount, 0) / months.length,
   );
-  const currentSummary = summarize(state, { now });
+  const currentSummary = summarize(state, { now, currency });
   const knownBills = currentSummary.bills
     .filter((b) => b.due.startsWith(next) && b.status !== 'paid')
     .reduce((s, b) => s + b.amount, 0);
   const expenses = variable + Math.max(fixed, knownBills),
     debt = currentSummary.debt;
   return {
+    currency,
     month: next,
     income,
     expenses,

@@ -16,7 +16,13 @@
     "test:integration": "node --test services/api/integration/*.test.js",
     "local": "node scripts/local.mjs",
     "backup": "node scripts/backup.mjs create",
-    "restore": "node scripts/backup.mjs restore"
+    "restore": "node scripts/backup.mjs restore",
+    "setup:imports": "node scripts/setup-imports.mjs",
+    "worker": "node services/api/src/worker.js",
+    "import:statements": "node scripts/import-statements.mjs",
+    "local:reset-login": "node scripts/reset-local-login.mjs",
+    "release:check": "npm run check && npm run test:integration && npm run build",
+    "prime:local": "node scripts/prime-local.mjs"
   },
   "devDependencies": {
     "@electric-sql/pglite": "^0.5.8",

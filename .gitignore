@@ -11,3 +11,10 @@ next-env.d.ts
 
 *.finsight
 *.json.key
+.env.*
+!.env.example
+**/.env.production
+.prime/
+
+__pycache__/
+*.pyc
