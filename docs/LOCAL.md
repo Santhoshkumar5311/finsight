@@ -3,7 +3,7 @@
 Requires Node.js 22+ and npm. No cloud account, Docker, or API keys are required for local demo mode.
 
 ```sh
-cd /Users/tonycali/fitness-coach/finsight
+cd /Users/tonycali/finsight
 npm ci
 npm run local
 ```
